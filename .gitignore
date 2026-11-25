@@ -1,0 +1,8 @@
+UI/Android/app/build/
+UI/Android/app/.cxx/
+UI/Android/.gradle/
+UI/Android/local.properties
+*.apk
+*.so
+*.a
+Build/

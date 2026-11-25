@@ -1,0 +1,104 @@
+From 6dfa0e2a79fb6f213749c64062bd817153e2b08e Mon Sep 17 00:00:00 2001
+From: Android Port Development <android-port@localhost>
+Date: Wed, 25 Nov 2026 14:17:07 +0300
+Subject: [PATCH 03/14] Android: link upstream AK stack bounds into JNI probe
+
+---
+ UI/Android/PORTING.md                        |  7 +++--
+ UI/Android/app/src/main/cpp/CMakeLists.txt   |  3 +-
+ UI/Android/app/src/main/cpp/NativeBridge.cpp | 29 ++++++++++++++++++++
+ 3 files changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/UI/Android/PORTING.md b/UI/Android/PORTING.md
+index 5155250c..d2cb89ae 100644
+--- a/UI/Android/PORTING.md
++++ b/UI/Android/PORTING.md
+@@ -9,10 +9,11 @@ Branch: `android/bringup`.
+ - JDK 17, Android API 35, NDK 28.0.13004108 and CMake 3.31.5 build the debug APK.
+ - `:app:assembleDebug :app:lintDebug --rerun-tasks` succeeds; lint XML has zero issues.
+ - Native bridge compiles/links for arm64-v8a and x86_64; ELF headers confirm both architectures.
+-- The real `AK/StackInfo.cpp` compiles to an object for both targets (not yet linked into the APK).
+-- APK contains the bootstrap JNI library and libc++ for both ABIs.
++- The real upstream `AK/StackInfo.cpp` compiles and is linked into each APK native library. `llvm-nm` confirms the exported constructor in both ELF files.
++- JNI calls `AK::StackInfo` on the JNI entry thread and on a native worker thread, checking that a local variable falls inside the reported stack bounds.
++- APK includes the JNI library and libc++ for both ABIs; Gradle Android Lint reports zero issues.
+ 
+-No device/emulator execution has been performed. The Unix socketpair diagnostic is compiled into the APK but has not been observed running on Android. No rendered page, networking, JavaScript execution, or engine sandbox is implemented yet.
++No device/emulator is currently connected, so these runtime probes have not been observed executing on Android yet. The Unix socketpair diagnostic also needs device execution. No rendered page, networking, JavaScript execution, or engine sandbox is implemented yet.
+ 
+ ## Integration boundaries
+ 
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index e358d839..cb6ec741 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -7,8 +7,7 @@ get_filename_component(LADYBIRD_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../.
+ if (NOT EXISTS "${LADYBIRD_ROOT}/AK/Platform.h")
+     message(FATAL_ERROR "Build UI/Android inside the Ladybird checkout")
+ endif()
+-add_library(ladybird_android_bootstrap SHARED NativeBridge.cpp)
++add_library(ladybird_android_bootstrap SHARED NativeBridge.cpp "${LADYBIRD_ROOT}/AK/StackInfo.cpp")
+ target_compile_features(ladybird_android_bootstrap PRIVATE cxx_std_23)
+ target_include_directories(ladybird_android_bootstrap PRIVATE "${LADYBIRD_ROOT}")
+ target_compile_options(ladybird_android_bootstrap PRIVATE -Wall -Wextra -Werror)
+-# Header-only AK probe; does not link the rendering engine.
+diff --git a/UI/Android/app/src/main/cpp/NativeBridge.cpp b/UI/Android/app/src/main/cpp/NativeBridge.cpp
+index b9e89c2b..15a66371 100644
+--- a/UI/Android/app/src/main/cpp/NativeBridge.cpp
++++ b/UI/Android/app/src/main/cpp/NativeBridge.cpp
+@@ -1,16 +1,25 @@
+ // SPDX-License-Identifier: BSD-2-Clause
+ #include <AK/Platform.h>
++#include <AK/StackInfo.h>
+ #include <AK/Types.h>
+ #include <jni.h>
++#include <cstdlib>
+ #include <sys/socket.h>
+ #include <unistd.h>
+ #include <string>
++#include <thread>
+ 
+ #ifndef AK_OS_ANDROID
+ #    error "Expected AK Android platform detection"
+ #endif
+ static_assert(sizeof(FlatPtr) == 8, "The first port targets 64-bit Android only");
+ 
++// StackInfo calls this upstream AK assertion hook if pthread fails; full AK assertion runtime is not linked in this probe.
++extern "C" [[noreturn]] __attribute__((noinline)) void ak_verification_failed(char const*)
++{
++    std::abort();
++}
++
+ extern "C" JNIEXPORT jstring JNICALL
+ Java_org_ladybird_androidport_NativeBridge_platformReport(JNIEnv* env, jclass)
+ {
+@@ -34,6 +43,26 @@ Java_org_ladybird_androidport_NativeBridge_platformReport(JNIEnv* env, jclass)
+ #endif
+     report += "\nRuntime page size: " + std::to_string(sysconf(_SC_PAGESIZE));
+     report += ipc_ok ? "\nUnix socketpair round-trip: PASS" : "\nUnix socketpair round-trip: FAIL";
++    AK::StackInfo stack_info;
++    int stack_marker = 0;
++    auto local_address = reinterpret_cast<FlatPtr>(&stack_marker);
++    bool stack_bounds_valid = stack_info.base() < local_address && local_address < stack_info.top()
++        && stack_info.size() == stack_info.top() - stack_info.base();
++    report += stack_bounds_valid ? "\nUpstream AK::StackInfo: PASS (JNI thread)" : "\nUpstream AK::StackInfo: FAIL";
++    report += "\nAK stack size: " + std::to_string(stack_info.size());
++
++    bool worker_stack_bounds_valid = false;
++    std::thread worker([&] {
++        AK::StackInfo worker_stack_info;
++        int worker_stack_marker = 0;
++        auto worker_local_address = reinterpret_cast<FlatPtr>(&worker_stack_marker);
++        worker_stack_bounds_valid = worker_stack_info.base() < worker_local_address
++            && worker_local_address < worker_stack_info.top()
++            && worker_stack_info.size() == worker_stack_info.top() - worker_stack_info.base();
++    });
++    worker.join();
++    report += worker_stack_bounds_valid ? "\nUpstream AK::StackInfo: PASS (native worker thread)"
++                                        : "\nUpstream AK::StackInfo: FAIL (native worker thread)";
+     report += "\nEngine status: NOT LINKED";
+     return env->NewStringUTF(report.c_str());
+ }
+-- 
+2.54.0.windows.1
+

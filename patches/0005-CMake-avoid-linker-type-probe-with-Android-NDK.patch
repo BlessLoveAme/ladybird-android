@@ -1,0 +1,50 @@
+From 33340ac4b8bcd4b9d17833733b12f382c12dd0bc Mon Sep 17 00:00:00 2001
+From: Android Port Development <android-port@localhost>
+Date: Wed, 25 Nov 2026 14:29:27 +0300
+Subject: [PATCH 05/14] CMake: avoid linker type probe with Android NDK
+
+---
+ Meta/CMake/use_linker.cmake | 2 +-
+ UI/Android/PORTING.md       | 8 +++++---
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/Meta/CMake/use_linker.cmake b/Meta/CMake/use_linker.cmake
+index 3513ea5f..9b3bac80 100644
+--- a/Meta/CMake/use_linker.cmake
++++ b/Meta/CMake/use_linker.cmake
+@@ -27,7 +27,7 @@ endif()
+ if (LAGOM_USE_LINKER)
+     # FIXME: Move to only setting CMAKE_LINKER_TYPE once we drop support for CMake < 3.29
+     # NOTE: CMAKE_LINKER_TYPE doesn't work on BSDs on CMake < 4.2
+-    if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.29 AND NOT BSD)
++    if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.29 AND NOT BSD AND NOT ANDROID)
+         string(TOUPPER ${LAGOM_USE_LINKER} linker_type)
+         set(CMAKE_LINKER_TYPE ${linker_type})
+     else()
+diff --git a/UI/Android/PORTING.md b/UI/Android/PORTING.md
+index d2cb89ae..0618bfdc 100644
+--- a/UI/Android/PORTING.md
++++ b/UI/Android/PORTING.md
+@@ -19,9 +19,11 @@ No device/emulator is currently connected, so these runtime probes have not been
+ 
+ `Libraries/LibCore/EventLoopImplementationUnix.cpp` had an Android-only branch that activated every registered notifier whenever poll returned any event, regardless of that notifier's `revents`. The branch has been removed; Android now uses the same readiness and notifier-type filtering as other Unix targets. This code change has not yet passed a full correctly configured Ladybird CMake build or an on-device pipe/socket test.
+ 
+-The standalone CMake project deliberately does not include the top-level Ladybird CMakeLists: that configuration currently resolves dependencies for the full browser even when only an early platform target is wanted. The header probe is not evidence that AK, LibCore or LibWeb build in full.
++`Meta/CMake/use_linker.cmake` used `CMAKE_LINKER_TYPE=LLD`, which CMake 3.31 rejects with the Android NDK toolchain. Android now takes the existing `-fuse-ld=lld` fallback, and the root configure advances past C/C++ compiler detection.
+ 
+-The next build work should preserve the actual library targets and their source lists rather than invent a second rendering library. AK currently needs FastFloat, simdutf, zmij, mimalloc and LLVM libc headers. LibCore adds further dependencies. Cross-build tools/code generators must run on the host; target libraries must use the NDK/Bionic sysroot.
++The current Git `origin/master` tree has no `UI/Android` frontend, Android vcpkg chainload script, or Android vcpkg triplets. The earlier Android Gradle/JNI project in this branch is an independent native smoke harness, not an upstream Ladybird UI integration. A manual root configure currently stops at `find_package(PkgConfig REQUIRED)` because a vcpkg Android toolchain and installed dependency set have not yet been supplied. No complete AK/LibWeb root build has succeeded.
++
++The next build work must configure the project's actual vcpkg manifest and target toolchain rather than inventing source lists. AK needs FastFloat, simdutf, zmij, mimalloc and LLVM libc headers. Cross-build tools/code generators must run on the host; target libraries must use the NDK/Bionic sysroot.
+ 
+ Android app subprocess launch must be designed explicitly. The current desktop fork/exec path is not automatically a valid Android service/sandbox model. Do not run untrusted web content in the UI process merely to bypass this issue.
+ 
+@@ -33,4 +35,4 @@ Android app subprocess launch must be designed explicitly. The current desktop f
+ 4. HTTPS navigation uses Ladybird networking with certificate validation.
+ 5. Process failure is reported without killing the UI, and renderer isolation is verified.
+ 
+-The bootstrap APK is a development artifact and does not meet these acceptance criteria.
++The JNI/AK-stack-probe APK is a development artifact and does not meet these acceptance criteria.
+-- 
+2.54.0.windows.1
+

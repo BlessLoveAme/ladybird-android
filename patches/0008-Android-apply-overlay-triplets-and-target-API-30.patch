@@ -1,0 +1,42 @@
+From 596001783bba01b0359d9e2eeceba97c212aa49c Mon Sep 17 00:00:00 2001
+From: Android Port Development <android-port@localhost>
+Date: Wed, 25 Nov 2026 15:47:47 +0300
+Subject: [PATCH 08/14] Android: apply overlay triplets and target API 30
+
+---
+ Meta/CMake/environment.cmake           | 6 +++++-
+ Meta/CMake/vcpkg/android-triplet.cmake | 2 ++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/Meta/CMake/environment.cmake b/Meta/CMake/environment.cmake
+index d15b2d44..db2ffe2e 100644
+--- a/Meta/CMake/environment.cmake
++++ b/Meta/CMake/environment.cmake
+@@ -32,7 +32,11 @@ if (DEFINED LADYBIRD_VCPKG_TYPE)
+         list(APPEND VCPKG_MANIFEST_FEATURES "sparkle")
+     endif()
+ 
+-    set(VCPKG_OVERLAY_TRIPLETS "$ENV{LADYBIRD_SOURCE_DIR}/Meta/CMake/vcpkg/${LADYBIRD_VCPKG_TYPE}-triplets" CACHE STRING "" FORCE)
++    set(ladybird_overlay_triplets "$ENV{LADYBIRD_SOURCE_DIR}/Meta/CMake/vcpkg/${LADYBIRD_VCPKG_TYPE}-triplets")
++    if (VCPKG_TARGET_ANDROID)
++        list(PREPEND ladybird_overlay_triplets "$ENV{LADYBIRD_SOURCE_DIR}/Meta/CMake/vcpkg/android-triplets")
++    endif()
++    set(VCPKG_OVERLAY_TRIPLETS "${ladybird_overlay_triplets}" CACHE STRING "" FORCE)
+ 
+     set(ENV{VCPKG_BINARY_SOURCES} "clear;files,${LADYBIRD_CACHE_DIR}/vcpkg-binary-cache,readwrite;$ENV{VCPKG_BINARY_SOURCES}")
+     set(ENV{X_VCPKG_ASSET_SOURCES} "clear;x-azurl,https://vcpkg-cache.app.ladybird.org/ladybird/source-assets/,$ENV{VCPKG_CACHE_SAS},read$ENV{VCPKG_CACHE_MODE}")
+diff --git a/Meta/CMake/vcpkg/android-triplet.cmake b/Meta/CMake/vcpkg/android-triplet.cmake
+index 36cdbab1..86aa5147 100644
+--- a/Meta/CMake/vcpkg/android-triplet.cmake
++++ b/Meta/CMake/vcpkg/android-triplet.cmake
+@@ -7,5 +7,7 @@ if (NOT ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
+ endif()
+ set(VCPKG_CMAKE_SYSTEM_NAME Android)
+ set(VCPKG_CMAKE_SYSTEM_VERSION 30)
++# The upstream built-in Android triplets default to API 28; support Ladybird's API 30 floor.
++set(VCPKG_CMAKE_CONFIGURE_OPTIONS -DANDROID_PLATFORM=android-30 -DANDROID_NATIVE_API_LEVEL=30)
+ set(VCPKG_CRT_LINKAGE dynamic)
+ set(VCPKG_LIBRARY_LINKAGE static)
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,62 @@
+From 50a77bddb45cf9ab73cf0f880e79257fc50873ea Mon Sep 17 00:00:00 2001
+From: Android Port Development <android-port@localhost>
+Date: Wed, 25 Nov 2026 13:59:36 +0300
+Subject: [PATCH 02/14] LibCore: respect notifier readiness on Android
+
+---
+ Libraries/LibCore/EventLoopImplementationUnix.cpp | 5 -----
+ UI/Android/PORTING.md                             | 2 ++
+ UI/Android/app/src/main/res/values/strings.xml    | 2 +-
+ 3 files changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/Libraries/LibCore/EventLoopImplementationUnix.cpp b/Libraries/LibCore/EventLoopImplementationUnix.cpp
+index fae4658f..3311a170 100644
+--- a/Libraries/LibCore/EventLoopImplementationUnix.cpp
++++ b/Libraries/LibCore/EventLoopImplementationUnix.cpp
+@@ -336,10 +336,6 @@ try_select_again:
+         for (size_t i = 1; i < thread_data.poll_fds.size(); ++i) {
+             auto& notifier = *thread_data.notifiers[i];
+ 
+-#ifdef AK_OS_ANDROID
+-            // FIXME: Make the check work under Android, perhaps use ALooper.
+-            ThreadEventQueue::current().post_event(notifier, Core::Event::Type::NotifierActivation);
+-#else
+             auto revents = thread_data.poll_fds[i].revents;
+ 
+             NotificationType type = NotificationType::None;
+@@ -356,7 +352,6 @@ try_select_again:
+ 
+             if (type != NotificationType::None)
+                 ThreadEventQueue::current().post_event(&notifier, Core::Event::Type::NotifierActivation);
+-#endif
+         }
+     }
+ 
+diff --git a/UI/Android/PORTING.md b/UI/Android/PORTING.md
+index d08b5986..5155250c 100644
+--- a/UI/Android/PORTING.md
++++ b/UI/Android/PORTING.md
+@@ -16,6 +16,8 @@ No device/emulator execution has been performed. The Unix socketpair diagnostic
+ 
+ ## Integration boundaries
+ 
++`Libraries/LibCore/EventLoopImplementationUnix.cpp` had an Android-only branch that activated every registered notifier whenever poll returned any event, regardless of that notifier's `revents`. The branch has been removed; Android now uses the same readiness and notifier-type filtering as other Unix targets. This code change has not yet passed a full correctly configured Ladybird CMake build or an on-device pipe/socket test.
++
+ The standalone CMake project deliberately does not include the top-level Ladybird CMakeLists: that configuration currently resolves dependencies for the full browser even when only an early platform target is wanted. The header probe is not evidence that AK, LibCore or LibWeb build in full.
+ 
+ The next build work should preserve the actual library targets and their source lists rather than invent a second rendering library. AK currently needs FastFloat, simdutf, zmij, mimalloc and LLVM libc headers. LibCore adds further dependencies. Cross-build tools/code generators must run on the host; target libraries must use the NDK/Bionic sysroot.
+diff --git a/UI/Android/app/src/main/res/values/strings.xml b/UI/Android/app/src/main/res/values/strings.xml
+index 2b84632f..3f75afdb 100644
+--- a/UI/Android/app/src/main/res/values/strings.xml
++++ b/UI/Android/app/src/main/res/values/strings.xml
+@@ -1,6 +1,6 @@
+ <resources>
+     <string name="app_name">Ladybird Port (experimental)</string>
+-    <string name="bringup_title">Ladybird Android — platform bring-up</string>
++    <string name="bringup_title">Ladybird Android - platform bring-up</string>
+     <string name="address_hint" translatable="false">https://example.com</string>
+     <string name="open_unavailable">Open (engine not connected)</string>
+     <string name="engine_unavailable">Experimental port. No websites are loaded.\nLibWeb/LibJS/WebContent are not linked yet; this is not a browser release.\n\n%1$s</string>
+-- 
+2.54.0.windows.1
+

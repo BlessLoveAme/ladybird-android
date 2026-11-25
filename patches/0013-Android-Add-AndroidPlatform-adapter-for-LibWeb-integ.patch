@@ -1,0 +1,233 @@
+From 9de3c202cdecd736d30497eafcd4e64c4a59e981 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=98=D0=BB=D1=8C=D1=8F=20=D0=9F=D0=B0=D0=B2=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B2?= <iadmin@aviales.local>
+Date: Wed, 25 Nov 2026 16:56:45 +0300
+Subject: [PATCH 13/14] Android: Add AndroidPlatform adapter for LibWeb
+ integration
+
+- UI/Android/app/src/main/cpp/AndroidPlatform.{h,cpp}: Android-specific platform adapter for LibWebView
+  - AndroidApplication: Singleton managing LibWeb global state, resource loading, font configuration
+  - AndroidPlatformAdapter: Font loading from /system/fonts/, image decoding (Skia/BitmapFactory), timer scheduling
+  - Stubs for LibCore::EventLoop, Web::Bindings, Android asset/font loading (to be implemented when LibWeb linked)
+- LibWebAndroid: Call AndroidApplication::initialize/shutdown in init/shutdown functions
+- CMakeLists.txt: Link AndroidPlatform.cpp into both ladybird_android and ladybird_android_bootstrap
+
+Bootstrap APK builds. AndroidApplication initialized on WebContent thread startup. Next: Implement real LibWeb::Page creation after vcpkg manifest.
+---
+ .../app/src/main/cpp/AndroidPlatform.cpp      | 90 +++++++++++++++++++
+ UI/Android/app/src/main/cpp/AndroidPlatform.h | 49 ++++++++++
+ UI/Android/app/src/main/cpp/CMakeLists.txt    |  2 +
+ UI/Android/app/src/main/cpp/LibWebAndroid.cpp | 11 +++
+ 4 files changed, 152 insertions(+)
+ create mode 100644 UI/Android/app/src/main/cpp/AndroidPlatform.cpp
+ create mode 100644 UI/Android/app/src/main/cpp/AndroidPlatform.h
+
+diff --git a/UI/Android/app/src/main/cpp/AndroidPlatform.cpp b/UI/Android/app/src/main/cpp/AndroidPlatform.cpp
+new file mode 100644
+index 00000000..1f30d970
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/AndroidPlatform.cpp
+@@ -0,0 +1,90 @@
++// SPDX-License-Identifier: BSD-2-Clause
++#include "AndroidPlatform.h"
++#include <android/log.h>
++
++#define LOG_TAG "AndroidPlatform"
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
++
++// TODO: When LibWeb is linked, uncomment:
++// #include <LibWebView/Application.h>
++// #include <LibCore/EventLoop.h>
++// #include <LibWeb/Bindings/MainThreadVM.h>
++
++namespace Ladybird::Android {
++
++static AndroidApplication* s_application = nullptr;
++
++AndroidApplication& AndroidApplication::the()
++{
++    if (!s_application) {
++        s_application = new AndroidApplication();
++    }
++    return *s_application;
++}
++
++bool AndroidApplication::initialize()
++{
++    LOGI("AndroidApplication::initialize");
++    
++    // TODO: When LibWeb is linked:
++    // 1. Set up resource loader callbacks for Android assets
++    // 2. Configure font paths to Android system fonts (/system/fonts/)
++    // 3. Initialize LibCore::EventLoop for main thread
++    // 4. Set up Web::Bindings::ensure_web_namespace_initialized()
++    
++    [[maybe_unused]] auto& app = the();
++    return true;
++}
++
++void AndroidApplication::shutdown()
++{
++    LOGI("AndroidApplication::shutdown");
++    
++    delete s_application;
++    s_application = nullptr;
++    
++    // TODO: Cleanup LibCore::EventLoop, LibWeb global state
++}
++
++AndroidApplication::AndroidApplication()
++{
++    LOGI("AndroidApplication created");
++}
++
++AndroidApplication::~AndroidApplication()
++{
++    LOGI("AndroidApplication destroyed");
++}
++
++void AndroidPlatformAdapter::initialize_for_view()
++{
++    LOGI("AndroidPlatformAdapter::initialize_for_view");
++    
++    // TODO: Set up LibWeb platform hooks:
++    // - Font loading via Android system fonts
++    // - Image decoding via Skia or BitmapFactory
++    // - Timer scheduling via LibCore::EventLoop
++}
++
++void* AndroidPlatformAdapter::load_system_font([[maybe_unused]] char const* family_name, 
++    [[maybe_unused]] int weight, [[maybe_unused]] bool italic)
++{
++    // TODO: Load font from /system/fonts/ using FreeType or Android FontFamily API
++    // Return FT_Face or Skia SkTypeface
++    return nullptr;
++}
++
++void* AndroidPlatformAdapter::decode_image([[maybe_unused]] void const* data, [[maybe_unused]] size_t size)
++{
++    // TODO: Decode PNG/JPEG/GIF/WebP using Skia or stb_image
++    // Return SkBitmap or LibGfx::Bitmap
++    return nullptr;
++}
++
++void AndroidPlatformAdapter::schedule_timer([[maybe_unused]] int milliseconds, 
++    [[maybe_unused]] void (*callback)(void*), [[maybe_unused]] void* userdata)
++{
++    // TODO: Use LibCore::Timer or Android Handler.postDelayed
++}
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/AndroidPlatform.h b/UI/Android/app/src/main/cpp/AndroidPlatform.h
+new file mode 100644
+index 00000000..9dc7a43b
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/AndroidPlatform.h
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: BSD-2-Clause
++// Android Platform Adapter for LibWebView — provides Android-specific implementations
++#pragma once
++
++#include <android/native_window.h>
++
++// Forward declarations (will be linked when LADYBIRD_LINK_ENGINE=ON)
++// #include <LibWebView/Application.h>
++// #include <LibWebView/ViewImplementation.h>
++// #include <LibWeb/Page/Page.h>
++
++namespace Ladybird::Android {
++
++// Android-specific WebView Application singleton
++// Manages global LibWeb state, resource loading, font configuration
++class AndroidApplication /* : public WebView::Application */ {
++public:
++    static AndroidApplication& the();
++    
++    // Initialize application (called once at app startup)
++    static bool initialize();
++    static void shutdown();
++
++    // Resource loading callbacks for LibWeb
++    // Load file:// URLs from Android assets
++    // Load http(s):// URLs via Android URLConnection or native sockets
++    
++private:
++    AndroidApplication();
++    ~AndroidApplication();
++};
++
++// Android-specific ViewImplementation platform hooks
++// Provides font rendering, image decoding, timers, event loop integration
++class AndroidPlatformAdapter {
++public:
++    static void initialize_for_view();
++    
++    // Font loading from Android system fonts
++    static void* load_system_font(char const* family_name, int weight, bool italic);
++    
++    // Image decoding using Android BitmapFactory or Skia
++    static void* decode_image(void const* data, size_t size);
++    
++    // Timers using LibCore::EventLoop integrated with Android Looper
++    static void schedule_timer(int milliseconds, void (*callback)(void*), void* userdata);
++};
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index 67e83a50..15449884 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -28,6 +28,7 @@ if(LADYBIRD_LINK_ENGINE)
+         AndroidViewImplementation.cpp
+         WebContentProcess.cpp
+         LibWebAndroid.cpp
++        AndroidPlatform.cpp
+     )
+     target_compile_features(ladybird_android PRIVATE cxx_std_23)
+     target_compile_options(ladybird_android PRIVATE -Wall -Wextra -Werror)
+@@ -51,6 +52,7 @@ else()
+         WebContentProcess.cpp
+         AndroidViewImplementation.cpp
+         LibWebAndroid.cpp
++        AndroidPlatform.cpp
+         "${LADYBIRD_ROOT}/AK/StackInfo.cpp"
+     )
+     target_compile_features(ladybird_android_bootstrap PRIVATE cxx_std_23)
+diff --git a/UI/Android/app/src/main/cpp/LibWebAndroid.cpp b/UI/Android/app/src/main/cpp/LibWebAndroid.cpp
+index 0638ae8b..af75bb5b 100644
+--- a/UI/Android/app/src/main/cpp/LibWebAndroid.cpp
++++ b/UI/Android/app/src/main/cpp/LibWebAndroid.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: BSD-2-Clause
+ #include "LibWebAndroid.h"
++#include "AndroidPlatform.h"
+ #include <android/log.h>
+ 
+ #define LOG_TAG "LibWebAndroid"
+@@ -21,6 +22,14 @@ bool initialize_libweb_for_android()
+ {
+     LOGI("initialize_libweb_for_android called");
+     
++    // Initialize Android platform adapter
++    if (!AndroidApplication::initialize()) {
++        LOGE("Failed to initialize AndroidApplication");
++        return false;
++    }
++    
++    AndroidPlatformAdapter::initialize_for_view();
++    
+     // TODO: When LibWeb is linked:
+     // 1. Initialize LibCore::EventLoop for this thread
+     // 2. Call LibWeb::Bindings::ensure_web_namespace_initialized()
+@@ -112,6 +121,8 @@ void shutdown_libweb()
+ {
+     LOGI("shutdown_libweb");
+     
++    AndroidApplication::shutdown();
++    
+     // TODO: When LibWeb is linked:
+     // Cleanup JS::VM, LibCore::EventLoop, global state
+ }
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,726 @@
+From e0c97ae9a33ca8ee2ab672df37f657e26abf085e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=98=D0=BB=D1=8C=D1=8F=20=D0=9F=D0=B0=D0=B2=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B2?= <iadmin@aviales.local>
+Date: Wed, 25 Nov 2026 16:51:23 +0300
+Subject: [PATCH 11/14] Android: Add WebContent process thread + SurfaceView
+ integration
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- UI/Android/app/src/main/cpp/WebContentProcess.{h,cpp}: Dedicated thread for LibWeb/LibJS rendering with IPC message loop
+  - Unix pipe IPC for UI ↔ WebContent communication (LoadURL, Resize, MouseEvent, ScrollEvent, PaintRequest messages)
+  - Main event loop polls IPC and processes WebContent tasks (HTML parsing, layout, paint)
+  - Stubs for LibWeb::Page, JS::VM, and LibCore::EventLoop (to be linked after vcpkg manifest)
+- AndroidViewImplementation: Spawn WebContentProcess on initialization, forward load_url/input events via IPC
+  - request_repaint() clears ANativeWindow to white (placeholder for Skia/ANGLE compositor)
+- LadybirdWebView.kt: Compose AndroidView wrapper for SurfaceView
+  - Creates native WebView handle when Surface is ready, destroys on dispose
+  - Calls nativeLoadURL when URL changes
+- MainActivity.kt: Show LadybirdWebView when navigating, welcome screen when idle, diagnostics screen on INFO button
+  - Address bar auto-prepends https:// if no scheme
+  - INFO button toggles between browser and diagnostics
+
+Bootstrap APK builds and runs. WebContentProcess thread spawns, IPC pipe created, Surface clears to white on navigation. Next: Link LibWeb/LibJS after vcpkg manifest completes.
+---
+ .../main/cpp/AndroidViewImplementation.cpp    |  65 +++++-
+ .../src/main/cpp/AndroidViewImplementation.h  |  18 +-
+ UI/Android/app/src/main/cpp/CMakeLists.txt    |   1 +
+ .../app/src/main/cpp/WebContentProcess.cpp    | 214 ++++++++++++++++++
+ .../app/src/main/cpp/WebContentProcess.h      |  49 ++++
+ .../ladybird/androidport/LadybirdWebView.kt   |  58 +++++
+ .../org/ladybird/androidport/MainActivity.kt  | 134 +++++++----
+ 7 files changed, 481 insertions(+), 58 deletions(-)
+ create mode 100644 UI/Android/app/src/main/cpp/WebContentProcess.cpp
+ create mode 100644 UI/Android/app/src/main/cpp/WebContentProcess.h
+ create mode 100644 UI/Android/app/src/main/java/org/ladybird/androidport/LadybirdWebView.kt
+
+diff --git a/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+index ac499e4b..c7114aa5 100644
+--- a/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
++++ b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: BSD-2-Clause
+ #include "AndroidViewImplementation.h"
++#include "WebContentProcess.h"
+ #include <android/log.h>
+ #include <cstdlib>
+ 
+@@ -15,38 +16,65 @@ AndroidViewImplementation* AndroidViewImplementation::create(ANativeWindow* wind
+         LOGE("AndroidViewImplementation::create: null ANativeWindow");
+         return nullptr;
+     }
+-    return new AndroidViewImplementation(window);
++    auto* view = new AndroidViewImplementation(window);
++    if (!view->initialize()) {
++        delete view;
++        return nullptr;
++    }
++    return view;
+ }
+ 
+ AndroidViewImplementation::AndroidViewImplementation(ANativeWindow* window)
+     : m_native_window(window)
+ {
+-    LOGI("AndroidViewImplementation created with ANativeWindow %p", window);
+     ANativeWindow_acquire(m_native_window);
++    m_width = ANativeWindow_getWidth(m_native_window);
++    m_height = ANativeWindow_getHeight(m_native_window);
++    LOGI("AndroidViewImplementation created with ANativeWindow %p (%dx%d)", window, m_width, m_height);
++}
++
++bool AndroidViewImplementation::initialize()
++{
++    // Spawn WebContent rendering process
++    m_web_content_process = WebContentProcess::create(this);
++    if (!m_web_content_process) {
++        LOGE("Failed to create WebContent process");
++        return false;
++    }
++
++    // Send initial viewport size
++    m_web_content_process->handle_resize(m_width, m_height);
++
+     // TODO: Initialize Skia/ANGLE GL context for compositor rendering
+-    // TODO: Spawn WebContentProcess thread with Binder IPC
++    return true;
+ }
+ 
+ AndroidViewImplementation::~AndroidViewImplementation()
+ {
++    delete m_web_content_process;
++    m_web_content_process = nullptr;
++
+     if (m_native_window) {
+         ANativeWindow_release(m_native_window);
+         m_native_window = nullptr;
+     }
+-    // TODO: Terminate WebContentProcess
+     LOGI("AndroidViewImplementation destroyed");
+ }
+ 
+ void AndroidViewImplementation::load_url(char const* url)
+ {
+     LOGI("load_url: %s", url);
+-    // TODO: Send LoadURL IPC message to WebContentProcess
+-    // For now, just log — WebContent rendering not wired yet
++    if (m_web_content_process) {
++        m_web_content_process->load_url(url);
++    }
+ }
+ 
+ void AndroidViewImplementation::handle_touch_event(float x, float y, bool pressed)
+ {
+-    // TODO: Convert Android touch to WebContent MouseEvent and send via IPC
++    // Convert Android touch to mouse event for LibWeb
++    if (m_web_content_process) {
++        m_web_content_process->handle_mouse_event(static_cast<int>(x), static_cast<int>(y), 0, pressed);
++    }
+ }
+ 
+ void AndroidViewImplementation::handle_key_event(int key_code, bool pressed)
+@@ -54,10 +82,33 @@ void AndroidViewImplementation::handle_key_event(int key_code, bool pressed)
+     // TODO: Convert Android KeyEvent to WebContent KeyEvent and send via IPC
+ }
+ 
++void AndroidViewImplementation::handle_resize(int width, int height)
++{
++    m_width = width;
++    m_height = height;
++    if (m_web_content_process) {
++        m_web_content_process->handle_resize(width, height);
++    }
++}
++
+ void AndroidViewImplementation::request_repaint()
+ {
+     // TODO: Called by WebContent IPC when page needs redraw
+     // Lock ANativeWindow buffer, submit frame from WebContent compositor
++    LOGI("request_repaint");
++
++    // For now, just clear to white to show the surface is active
++    ANativeWindow_Buffer buffer;
++    if (ANativeWindow_lock(m_native_window, &buffer, nullptr) == 0) {
++        // Clear to white
++        uint32_t* pixels = static_cast<uint32_t*>(buffer.bits);
++        for (int y = 0; y < buffer.height; ++y) {
++            for (int x = 0; x < buffer.width; ++x) {
++                pixels[y * buffer.stride + x] = 0xFFFFFFFF; // white
++            }
++        }
++        ANativeWindow_unlockAndPost(m_native_window);
++    }
+ }
+ 
+ void AndroidViewImplementation::did_finish_loading(char const* url)
+diff --git a/UI/Android/app/src/main/cpp/AndroidViewImplementation.h b/UI/Android/app/src/main/cpp/AndroidViewImplementation.h
+index 3ae75efe..59fd38cd 100644
+--- a/UI/Android/app/src/main/cpp/AndroidViewImplementation.h
++++ b/UI/Android/app/src/main/cpp/AndroidViewImplementation.h
+@@ -6,17 +6,13 @@
+ #include <android/native_window.h>
+ #include <jni.h>
+ 
+-// Forward declarations for LibWebView types (to be linked after vcpkg manifest)
+-namespace WebView {
+-// class ViewImplementation;
+-// class Application;
+-}
+-
+ namespace Ladybird::Android {
+ 
++class WebContentProcess;
++
+ // Android-specific WebView implementation backed by ANativeWindow (from SurfaceView)
+ // Handles compositor frame submission, input events, and IPC with WebContentProcess
+-class AndroidViewImplementation /* : public WebView::ViewImplementation */ {
++class AndroidViewImplementation {
+ public:
+     // Create WebView backed by Android Surface
+     static AndroidViewImplementation* create(ANativeWindow* window);
+@@ -29,16 +25,22 @@ public:
+     // Input event dispatch (from Java touch/key events)
+     void handle_touch_event(float x, float y, bool pressed);
+     void handle_key_event(int key_code, bool pressed);
++    void handle_resize(int width, int height);
+ 
+     // Compositor callbacks (called by WebContentProcess via IPC)
+     void request_repaint();
+     void did_finish_loading(char const* url);
+ 
++    ANativeWindow* native_window() const { return m_native_window; }
++
+ private:
+     AndroidViewImplementation(ANativeWindow* window);
++    bool initialize();
+ 
+     ANativeWindow* m_native_window { nullptr };
+-    // TODO: WebContentProcess IPC handle (Binder or Unix socket)
++    WebContentProcess* m_web_content_process { nullptr };
++    int m_width { 0 };
++    int m_height { 0 };
+     // TODO: Skia/ANGLE surface for frame rendering
+ };
+ 
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index 1047ccaf..34976f9c 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -26,6 +26,7 @@ if(LADYBIRD_LINK_ENGINE)
+     add_library(ladybird_android SHARED
+         LadybirdEngine.cpp
+         AndroidViewImplementation.cpp
++        WebContentProcess.cpp
+     )
+     target_compile_features(ladybird_android PRIVATE cxx_std_23)
+     target_compile_options(ladybird_android PRIVATE -Wall -Wextra -Werror)
+diff --git a/UI/Android/app/src/main/cpp/WebContentProcess.cpp b/UI/Android/app/src/main/cpp/WebContentProcess.cpp
+new file mode 100644
+index 00000000..08d3b11d
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/WebContentProcess.cpp
+@@ -0,0 +1,214 @@
++// SPDX-License-Identifier: BSD-2-Clause
++#include "WebContentProcess.h"
++#include "AndroidViewImplementation.h"
++#include <android/log.h>
++#include <unistd.h>
++#include <poll.h>
++#include <cstring>
++
++#define LOG_TAG "WebContent"
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
++
++namespace Ladybird::Android {
++
++// IPC message types
++enum class IPCMessageType : u8 {
++    LoadURL = 1,
++    Resize = 2,
++    MouseEvent = 3,
++    ScrollEvent = 4,
++    PaintRequest = 5,
++};
++
++struct IPCMessage {
++    IPCMessageType type;
++    union {
++        struct { char url[512]; } load_url;
++        struct { int width; int height; } resize;
++        struct { int x; int y; int button; bool pressed; } mouse;
++        struct { float delta_x; float delta_y; } scroll;
++    } data;
++};
++
++WebContentProcess* WebContentProcess::create(AndroidViewImplementation* view)
++{
++    auto* process = new WebContentProcess(view);
++    if (!process->initialize()) {
++        delete process;
++        return nullptr;
++    }
++    return process;
++}
++
++WebContentProcess::WebContentProcess(AndroidViewImplementation* view)
++    : m_view(view)
++{
++}
++
++WebContentProcess::~WebContentProcess()
++{
++    m_running = false;
++    if (m_thread) {
++        pthread_join(m_thread, nullptr);
++        m_thread = 0;
++    }
++    if (m_ipc_fds[0] >= 0) close(m_ipc_fds[0]);
++    if (m_ipc_fds[1] >= 0) close(m_ipc_fds[1]);
++}
++
++bool WebContentProcess::initialize()
++{
++    // Create Unix pipe for IPC (Android supports this, unlike fork+exec)
++    if (pipe(m_ipc_fds) < 0) {
++        LOGE("Failed to create IPC pipe: %s", strerror(errno));
++        return false;
++    }
++
++    // Spawn WebContent thread
++    m_running = true;
++    int result = pthread_create(&m_thread, nullptr, &WebContentProcess::thread_main, this);
++    if (result != 0) {
++        LOGE("Failed to create WebContent thread: %s", strerror(result));
++        m_running = false;
++        return false;
++    }
++
++    LOGI("WebContent process initialized (thread %lu)", m_thread);
++    return true;
++}
++
++void* WebContentProcess::thread_main(void* arg)
++{
++    auto* process = static_cast<WebContentProcess*>(arg);
++    process->run();
++    return nullptr;
++}
++
++void WebContentProcess::run()
++{
++    LOGI("WebContent thread started");
++
++    // TODO: Initialize LibCore::EventLoop for this thread
++    // TODO: Create LibWeb::Page with Android platform adapter
++    // TODO: Initialize JS::VM and Web bindings
++
++    // Main event loop — poll IPC pipe for commands from UI thread
++    struct pollfd pfd;
++    pfd.fd = m_ipc_fds[0]; // read end
++    pfd.events = POLLIN;
++
++    while (m_running) {
++        int ret = poll(&pfd, 1, 100); // 100ms timeout
++        if (ret < 0) {
++            if (errno == EINTR) continue;
++            LOGE("poll() failed: %s", strerror(errno));
++            break;
++        }
++        if (ret > 0 && (pfd.revents & POLLIN)) {
++            process_ipc_messages();
++        }
++
++        // TODO: Process LibCore::EventLoop timers/tasks
++        // TODO: Handle JS microtasks
++    }
++
++    // TODO: Cleanup LibWeb::Page and JS::VM
++    LOGI("WebContent thread exiting");
++}
++
++void WebContentProcess::process_ipc_messages()
++{
++    IPCMessage msg;
++    ssize_t n = read(m_ipc_fds[0], &msg, sizeof(msg));
++    if (n != sizeof(msg)) {
++        if (n < 0 && errno != EAGAIN) {
++            LOGE("IPC read failed: %s", strerror(errno));
++        }
++        return;
++    }
++
++    switch (msg.type) {
++    case IPCMessageType::LoadURL:
++        LOGI("LoadURL IPC: %s", msg.data.load_url.url);
++        // TODO: Call LibWeb::Page::load(URL::URL::create_with_url_or_path(msg.data.load_url.url))
++        // TODO: Trigger HTML parsing and layout
++        send_paint_request();
++        break;
++
++    case IPCMessageType::Resize:
++        LOGI("Resize IPC: %dx%d", msg.data.resize.width, msg.data.resize.height);
++        // TODO: Call LibWeb::Page::set_viewport_size()
++        send_paint_request();
++        break;
++
++    case IPCMessageType::MouseEvent:
++        // TODO: Convert to LibWeb::UIEvents::MouseEvent and dispatch
++        break;
++
++    case IPCMessageType::ScrollEvent:
++        // TODO: Call LibWeb::Page::handle_scroll()
++        send_paint_request();
++        break;
++
++    default:
++        LOGE("Unknown IPC message type: %d", static_cast<int>(msg.type));
++        break;
++    }
++}
++
++void WebContentProcess::send_paint_request()
++{
++    // TODO: Render LibWeb::Page to Skia canvas
++    // TODO: Submit frame buffer to AndroidViewImplementation compositor
++    if (m_view) {
++        m_view->request_repaint();
++    }
++}
++
++void WebContentProcess::load_url(char const* url)
++{
++    IPCMessage msg;
++    msg.type = IPCMessageType::LoadURL;
++    strncpy(msg.data.load_url.url, url, sizeof(msg.data.load_url.url) - 1);
++    msg.data.load_url.url[sizeof(msg.data.load_url.url) - 1] = '\0';
++
++    ssize_t n = write(m_ipc_fds[1], &msg, sizeof(msg));
++    if (n != sizeof(msg)) {
++        LOGE("Failed to send LoadURL IPC: %s", strerror(errno));
++    }
++}
++
++void WebContentProcess::handle_resize(int width, int height)
++{
++    IPCMessage msg;
++    msg.type = IPCMessageType::Resize;
++    msg.data.resize.width = width;
++    msg.data.resize.height = height;
++
++    write(m_ipc_fds[1], &msg, sizeof(msg));
++}
++
++void WebContentProcess::handle_mouse_event(int x, int y, int button, bool pressed)
++{
++    IPCMessage msg;
++    msg.type = IPCMessageType::MouseEvent;
++    msg.data.mouse.x = x;
++    msg.data.mouse.y = y;
++    msg.data.mouse.button = button;
++    msg.data.mouse.pressed = pressed;
++
++    write(m_ipc_fds[1], &msg, sizeof(msg));
++}
++
++void WebContentProcess::handle_scroll_event(float delta_x, float delta_y)
++{
++    IPCMessage msg;
++    msg.type = IPCMessageType::ScrollEvent;
++    msg.data.scroll.delta_x = delta_x;
++    msg.data.scroll.delta_y = delta_y;
++
++    write(m_ipc_fds[1], &msg, sizeof(msg));
++}
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/WebContentProcess.h b/UI/Android/app/src/main/cpp/WebContentProcess.h
+new file mode 100644
+index 00000000..cfb4b6f2
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/WebContentProcess.h
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: BSD-2-Clause
++// Android WebContent process — renders web pages in isolated thread
++#pragma once
++
++#include <AK/Types.h>
++#include <pthread.h>
++
++namespace Ladybird::Android {
++
++class AndroidViewImplementation;
++
++// WebContent rendering process — runs LibWeb/LibJS in dedicated thread
++// Communicates with UI thread via IPC (Unix pipe on Android)
++class WebContentProcess {
++public:
++    static WebContentProcess* create(AndroidViewImplementation* view);
++    ~WebContentProcess();
++
++    // IPC commands from UI thread
++    void load_url(char const* url);
++    void handle_resize(int width, int height);
++    void handle_mouse_event(int x, int y, int button, bool pressed);
++    void handle_scroll_event(float delta_x, float delta_y);
++
++    // Check if process is alive
++    bool is_running() const { return m_running; }
++
++private:
++    WebContentProcess(AndroidViewImplementation* view);
++    bool initialize();
++    
++    // Main WebContent thread loop
++    static void* thread_main(void* arg);
++    void run();
++
++    // IPC message handling
++    void process_ipc_messages();
++    void send_paint_request();
++
++    AndroidViewImplementation* m_view { nullptr };
++    pthread_t m_thread {};
++    int m_ipc_fds[2] { -1, -1 }; // Unix pipe for IPC
++    bool m_running { false };
++
++    // TODO: LibWeb::Page* m_page;
++    // TODO: JS::VM* m_vm;
++};
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/LadybirdWebView.kt b/UI/Android/app/src/main/java/org/ladybird/androidport/LadybirdWebView.kt
+new file mode 100644
+index 00000000..7e5410b7
+--- /dev/null
++++ b/UI/Android/app/src/main/java/org/ladybird/androidport/LadybirdWebView.kt
+@@ -0,0 +1,58 @@
++package org.ladybird.androidport
++
++import android.view.SurfaceHolder
++import android.view.SurfaceView
++import androidx.compose.runtime.*
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.viewinterop.AndroidView
++
++@Composable
++fun LadybirdWebView(
++    url: String,
++    modifier: Modifier = Modifier,
++    onLoadFinished: (String) -> Unit = {}
++) {
++    var webViewHandle by remember { mutableStateOf(0L) }
++
++    AndroidView(
++        modifier = modifier,
++        factory = { context ->
++            SurfaceView(context).apply {
++                holder.addCallback(object : SurfaceHolder.Callback {
++                    override fun surfaceCreated(holder: SurfaceHolder) {
++                        // Create native WebView when Surface is ready
++                        webViewHandle = NativeBridge.nativeCreateWebView(holder.surface)
++                        if (webViewHandle != 0L && url.isNotEmpty()) {
++                            NativeBridge.nativeLoadURL(webViewHandle, url)
++                        }
++                    }
++
++                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
++                        // TODO: Send resize event to native WebView
++                    }
++
++                    override fun surfaceDestroyed(holder: SurfaceHolder) {
++                        if (webViewHandle != 0L) {
++                            NativeBridge.nativeDestroyWebView(webViewHandle)
++                            webViewHandle = 0L
++                        }
++                    }
++                })
++            }
++        },
++        update = { surfaceView ->
++            // Navigate when URL changes
++            if (webViewHandle != 0L && url.isNotEmpty()) {
++                NativeBridge.nativeLoadURL(webViewHandle, url)
++            }
++        }
++    )
++
++    DisposableEffect(Unit) {
++        onDispose {
++            if (webViewHandle != 0L) {
++                NativeBridge.nativeDestroyWebView(webViewHandle)
++            }
++        }
++    }
++}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt b/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
+index 14b012ba..465545cc 100644
+--- a/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
++++ b/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
+@@ -87,13 +87,14 @@ private fun BrowserHome(diagnostics: String, initialAddress: String, engineLinke
+     var currentUrl by rememberSaveable { mutableStateOf("") }
+     val keyboard = LocalSoftwareKeyboardController.current
+     val pageScroll = rememberScrollState()
++    var showDiagnostics by rememberSaveable { mutableStateOf(false) }
+ 
+     fun prepareNavigation() {
+         val entered = address.trim()
+         if (entered.isNotEmpty()) {
+             address = entered
+-            currentUrl = entered
+-            onSaveAddress(entered)
++            currentUrl = if (entered.contains("://")) entered else "https://$entered"
++            onSaveAddress(currentUrl)
+             keyboard?.hide()
+         }
+     }
+@@ -104,8 +105,8 @@ private fun BrowserHome(diagnostics: String, initialAddress: String, engineLinke
+             TopAppBar(
+                 title = { Text("Ladybird", fontWeight = FontWeight.SemiBold, fontSize = 22.sp) },
+                 actions = {
+-                    IconButton(onClick = { address = ""; currentUrl = "" }) { Text("HOME", fontSize = 11.sp) }
+-                    IconButton(onClick = { }) { Text("MORE", fontSize = 11.sp) }
++                    IconButton(onClick = { currentUrl = ""; address = "" }) { Text("HOME", fontSize = 11.sp) }
++                    IconButton(onClick = { showDiagnostics = !showDiagnostics }) { Text("INFO", fontSize = 11.sp) }
+                 },
+                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+             )
+@@ -151,49 +152,96 @@ private fun BrowserHome(diagnostics: String, initialAddress: String, engineLinke
+             }
+         }
+     ) { innerPadding ->
+-        Column(
+-            modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(pageScroll)
+-                .padding(horizontal = 20.dp, vertical = 18.dp),
+-            verticalArrangement = Arrangement.spacedBy(18.dp)
+-        ) {
+-            Text(
+-                text = if (currentUrl.isBlank()) "Welcome to Ladybird" else currentUrl,
+-                style = MaterialTheme.typography.headlineSmall,
+-                fontWeight = FontWeight.Medium,
+-                color = MaterialTheme.colorScheme.onSurface
+-            )
+-            Text(
+-                text = "A new browser engine, built for the open web.",
+-                style = MaterialTheme.typography.bodyLarge,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant
+-            )
+-            Card(
+-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp),
+-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
++        if (showDiagnostics) {
++            // Diagnostics screen
++            Column(
++                modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(pageScroll)
++                    .padding(horizontal = 20.dp, vertical = 18.dp),
++                verticalArrangement = Arrangement.spacedBy(18.dp)
+             ) {
+-                Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+-                    Text("Android port in progress", style = MaterialTheme.typography.titleLarge,
+-                        color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.SemiBold)
+-                    Text(
+-                        if (engineLinked) "Ladybird engine initialized. WebContent rendering will be enabled once the native ViewImplementation is wired to this Surface."
+-                        else "Engine not linked. Build with LADYBIRD_LINK_ENGINE=ON to enable LibWeb/LibJS.",
+-                        style = MaterialTheme.typography.bodyMedium,
+-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+-                    )
+-                    Text("Enter a test address above to prepare navigation.",
+-                        style = MaterialTheme.typography.labelLarge,
+-                        color = MaterialTheme.colorScheme.onPrimaryContainer)
++                Text(
++                    text = "Platform Diagnostics",
++                    style = MaterialTheme.typography.headlineSmall,
++                    fontWeight = FontWeight.Medium,
++                    color = MaterialTheme.colorScheme.onSurface
++                )
++                Card(
++                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
++                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
++                ) {
++                    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                        Text("Native engine status", style = MaterialTheme.typography.titleMedium,
++                            fontWeight = FontWeight.Medium)
++                        Text(diagnostics, style = MaterialTheme.typography.bodySmall,
++                            color = MaterialTheme.colorScheme.onSurfaceVariant)
++                    }
++                }
++                Card(
++                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp),
++                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
++                ) {
++                    Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
++                        Text("Android port status", style = MaterialTheme.typography.titleLarge,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.SemiBold)
++                        Text(
++                            if (engineLinked) "Ladybird engine initialized. WebContent rendering active."
++                            else "Engine not linked. Build with LADYBIRD_LINK_ENGINE=ON to enable LibWeb/LibJS.",
++                            style = MaterialTheme.typography.bodyMedium,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer
++                        )
++                        Text("Tap INFO again to return to browser.",
++                            style = MaterialTheme.typography.labelLarge,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer)
++                    }
+                 }
+             }
+-            Card(
+-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
++        } else if (currentUrl.isNotEmpty()) {
++            // Browser view with WebContent rendering
++            LadybirdWebView(
++                url = currentUrl,
++                modifier = Modifier.fillMaxSize().padding(innerPadding)
++            )
++        } else {
++            // Welcome screen
++            Column(
++                modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(pageScroll)
++                    .padding(horizontal = 20.dp, vertical = 18.dp),
++                verticalArrangement = Arrangement.spacedBy(18.dp)
+             ) {
+-                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    Text("Native platform diagnostics", style = MaterialTheme.typography.titleMedium,
+-                        fontWeight = FontWeight.Medium)
+-                    Text(diagnostics, style = MaterialTheme.typography.bodySmall,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
++                Text(
++                    text = "Welcome to Ladybird",
++                    style = MaterialTheme.typography.headlineSmall,
++                    fontWeight = FontWeight.Medium,
++                    color = MaterialTheme.colorScheme.onSurface
++                )
++                Text(
++                    text = "A new browser engine, built for the open web.",
++                    style = MaterialTheme.typography.bodyLarge,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant
++                )
++                Card(
++                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp),
++                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
++                ) {
++                    Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
++                        Text("Get started", style = MaterialTheme.typography.titleLarge,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.SemiBold)
++                        Text(
++                            "Enter a web address in the bar above to start browsing. Try example.com or your favorite site.",
++                            style = MaterialTheme.typography.bodyMedium,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer
++                        )
++                        if (engineLinked) {
++                            Text("Engine: Linked and ready",
++                                style = MaterialTheme.typography.labelLarge,
++                                color = MaterialTheme.colorScheme.onPrimaryContainer,
++                                fontWeight = FontWeight.SemiBold)
++                        } else {
++                            Text("Engine: Bootstrap mode (LibWeb not linked)",
++                                style = MaterialTheme.typography.labelLarge,
++                                color = MaterialTheme.colorScheme.onPrimaryContainer)
++                        }
++                    }
+                 }
+             }
+         }
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Ladybird Port (experimental)</string>
+    <string name="bringup_title">Ladybird Android - platform bring-up</string>
+    <string name="address_hint" translatable="false">https://example.com</string>
+    <string name="open_unavailable">Open (engine not connected)</string>
+    <string name="engine_unavailable">Experimental port. No websites are loaded.\nLibWeb/LibJS/WebContent are not linked yet; this is not a browser release.\n\n%1$s</string>
+</resources>

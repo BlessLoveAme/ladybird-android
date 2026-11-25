@@ -1,0 +1,357 @@
+From ac9ef9bd605f2fe1976fe58093e0ffa44fced0c6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=98=D0=BB=D1=8C=D1=8F=20=D0=9F=D0=B0=D0=B2=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B2?= <iadmin@aviales.local>
+Date: Wed, 25 Nov 2026 16:54:15 +0300
+Subject: [PATCH 12/14] Android: Add LibWebAndroid integration layer for HTML
+ rendering
+
+- UI/Android/app/src/main/cpp/LibWebAndroid.{h,cpp}: LibWeb/LibJS initialization and Page management API
+  - initialize_libweb_for_android(): Initialize LibCore::EventLoop, JS::VM, Web bindings
+  - create_web_page(): Create LibWeb::Page with viewport size
+  - web_page_load_url/resize/mouse_event/render(): LibWeb operations (stubs until engine linked)
+- WebContentProcess: Call LibWebAndroid functions in thread loop (initialize, create page, dispatch events, render)
+- AndroidViewImplementation/LibWebAndroid: Fix unused parameter warnings with [[maybe_unused]]
+- WebContentProcess: Add <cerrno> for errno/EINTR/EAGAIN
+- CMakeLists.txt: Link LibWebAndroid.cpp into both ladybird_android and ladybird_android_bootstrap
+
+Bootstrap APK builds and runs. WebContent thread initializes, creates LibWeb::Page stub (returns nullptr until linked), processes IPC messages. Surface clears to white. Next: Link real LibWeb/LibJS after vcpkg manifest.
+---
+ .../main/cpp/AndroidViewImplementation.cpp    |   2 +-
+ UI/Android/app/src/main/cpp/CMakeLists.txt    |  10 +-
+ UI/Android/app/src/main/cpp/LibWebAndroid.cpp | 119 ++++++++++++++++++
+ UI/Android/app/src/main/cpp/LibWebAndroid.h   |  38 ++++++
+ .../app/src/main/cpp/WebContentProcess.cpp    |  48 +++++--
+ .../app/src/main/cpp/WebContentProcess.h      |   4 +-
+ 6 files changed, 206 insertions(+), 15 deletions(-)
+ create mode 100644 UI/Android/app/src/main/cpp/LibWebAndroid.cpp
+ create mode 100644 UI/Android/app/src/main/cpp/LibWebAndroid.h
+
+diff --git a/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+index c7114aa5..983a1f7e 100644
+--- a/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
++++ b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+@@ -77,7 +77,7 @@ void AndroidViewImplementation::handle_touch_event(float x, float y, bool presse
+     }
+ }
+ 
+-void AndroidViewImplementation::handle_key_event(int key_code, bool pressed)
++void AndroidViewImplementation::handle_key_event([[maybe_unused]] int key_code, [[maybe_unused]] bool pressed)
+ {
+     // TODO: Convert Android KeyEvent to WebContent KeyEvent and send via IPC
+ }
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index 34976f9c..67e83a50 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -27,6 +27,7 @@ if(LADYBIRD_LINK_ENGINE)
+         LadybirdEngine.cpp
+         AndroidViewImplementation.cpp
+         WebContentProcess.cpp
++        LibWebAndroid.cpp
+     )
+     target_compile_features(ladybird_android PRIVATE cxx_std_23)
+     target_compile_options(ladybird_android PRIVATE -Wall -Wextra -Werror)
+@@ -45,8 +46,15 @@ if(LADYBIRD_LINK_ENGINE)
+     target_link_libraries(ladybird_android PRIVATE log android)
+ else()
+     # Bootstrap smoke APK — minimal AK test without engine
+-    add_library(ladybird_android_bootstrap SHARED NativeBridge.cpp "${LADYBIRD_ROOT}/AK/StackInfo.cpp")
++    add_library(ladybird_android_bootstrap SHARED
++        NativeBridge.cpp
++        WebContentProcess.cpp
++        AndroidViewImplementation.cpp
++        LibWebAndroid.cpp
++        "${LADYBIRD_ROOT}/AK/StackInfo.cpp"
++    )
+     target_compile_features(ladybird_android_bootstrap PRIVATE cxx_std_23)
+     target_include_directories(ladybird_android_bootstrap PRIVATE "${LADYBIRD_ROOT}")
+     target_compile_options(ladybird_android_bootstrap PRIVATE -Wall -Wextra -Werror)
++    target_link_libraries(ladybird_android_bootstrap PRIVATE log android)
+ endif()
+diff --git a/UI/Android/app/src/main/cpp/LibWebAndroid.cpp b/UI/Android/app/src/main/cpp/LibWebAndroid.cpp
+new file mode 100644
+index 00000000..0638ae8b
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/LibWebAndroid.cpp
+@@ -0,0 +1,119 @@
++// SPDX-License-Identifier: BSD-2-Clause
++#include "LibWebAndroid.h"
++#include <android/log.h>
++
++#define LOG_TAG "LibWebAndroid"
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
++
++// TODO: When LADYBIRD_LINK_ENGINE=ON, uncomment these includes:
++// #include <LibWeb/Page/Page.h>
++// #include <LibJS/Runtime/VM.h>
++// #include <LibCore/EventLoop.h>
++// #include <LibWeb/HTML/HTMLDocument.h>
++// #include <LibWeb/DOM/Document.h>
++// #include <LibWeb/Bindings/MainThreadVM.h>
++// #include <LibURL/URL.h>
++
++namespace Ladybird::Android {
++
++bool initialize_libweb_for_android()
++{
++    LOGI("initialize_libweb_for_android called");
++    
++    // TODO: When LibWeb is linked:
++    // 1. Initialize LibCore::EventLoop for this thread
++    // 2. Call LibWeb::Bindings::ensure_web_namespace_initialized()
++    // 3. Create JS::VM with Android platform hooks
++    // 4. Register Web IDL bindings
++    
++    // For now, just return false until LibWeb is linked
++    LOGE("LibWeb not linked — returning false");
++    return false;
++}
++
++void* create_web_page(int viewport_width, int viewport_height)
++{
++    LOGI("create_web_page: %dx%d", viewport_width, viewport_height);
++    
++    // TODO: When LibWeb is linked:
++    // auto page = make<LibWeb::Page>(/* Android platform adapter */);
++    // page->set_viewport_size({ viewport_width, viewport_height });
++    // return page.leak_ptr();
++    
++    return nullptr;
++}
++
++void web_page_load_url(void* page_handle, char const* url)
++{
++    LOGI("web_page_load_url: %s", url);
++    
++    if (!page_handle) {
++        LOGE("web_page_load_url: null page handle");
++        return;
++    }
++    
++    // TODO: When LibWeb is linked:
++    // auto* page = static_cast<LibWeb::Page*>(page_handle);
++    // auto url_or_error = URL::URL::create_with_url_or_path(url);
++    // if (url_or_error.is_error()) {
++    //     LOGE("Invalid URL: %s", url);
++    //     return;
++    // }
++    // page->load(url_or_error.release_value());
++}
++
++void web_page_resize(void* page_handle, int width, int height)
++{
++    LOGI("web_page_resize: %dx%d", width, height);
++    
++    if (!page_handle) return;
++    
++    // TODO: When LibWeb is linked:
++    // auto* page = static_cast<LibWeb::Page*>(page_handle);
++    // page->set_viewport_size({ width, height });
++}
++
++void web_page_mouse_event(void* page_handle, [[maybe_unused]] int x, [[maybe_unused]] int y, [[maybe_unused]] int button, [[maybe_unused]] bool pressed)
++{
++    if (!page_handle) return;
++    
++    // TODO: When LibWeb is linked:
++    // auto* page = static_cast<LibWeb::Page*>(page_handle);
++    // Create LibWeb::UIEvents::MouseEvent and dispatch to document
++}
++
++void* web_page_render(void* page_handle)
++{
++    if (!page_handle) return nullptr;
++    
++    // TODO: When LibWeb is linked + Skia compositor ready:
++    // auto* page = static_cast<LibWeb::Page*>(page_handle);
++    // 1. Run layout if needed: page->document()->update_layout()
++    // 2. Create Skia canvas backed by ANativeWindow buffer
++    // 3. Paint page to canvas: page->paint_tree()->paint_all_phases()
++    // 4. Return frame buffer for ANativeWindow_unlockAndPost
++    
++    return nullptr;
++}
++
++void destroy_web_page(void* page_handle)
++{
++    LOGI("destroy_web_page");
++    
++    if (!page_handle) return;
++    
++    // TODO: When LibWeb is linked:
++    // auto* page = static_cast<LibWeb::Page*>(page_handle);
++    // delete page;
++}
++
++void shutdown_libweb()
++{
++    LOGI("shutdown_libweb");
++    
++    // TODO: When LibWeb is linked:
++    // Cleanup JS::VM, LibCore::EventLoop, global state
++}
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/LibWebAndroid.h b/UI/Android/app/src/main/cpp/LibWebAndroid.h
+new file mode 100644
+index 00000000..4a7a987b
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/LibWebAndroid.h
+@@ -0,0 +1,38 @@
++// SPDX-License-Identifier: BSD-2-Clause
++// LibWeb Page initialization for Android — creates JS VM, HTML parser, layout engine
++#pragma once
++
++// Forward declarations (will be linked when LADYBIRD_LINK_ENGINE=ON)
++// #include <LibWeb/Page/Page.h>
++// #include <LibJS/Runtime/VM.h>
++// #include <LibCore/EventLoop.h>
++
++namespace Ladybird::Android {
++
++// Initialize LibWeb for Android WebContent thread
++// Returns true if LibWeb/LibJS successfully initialized
++bool initialize_libweb_for_android();
++
++// Create LibWeb::Page for rendering
++// Returns opaque handle (LibWeb::Page*) or nullptr on failure
++void* create_web_page(int viewport_width, int viewport_height);
++
++// Navigate page to URL
++void web_page_load_url(void* page_handle, char const* url);
++
++// Handle viewport resize
++void web_page_resize(void* page_handle, int width, int height);
++
++// Dispatch mouse event to page
++void web_page_mouse_event(void* page_handle, int x, int y, int button, bool pressed);
++
++// Render page to Skia canvas (returns frame buffer for compositor)
++void* web_page_render(void* page_handle);
++
++// Destroy LibWeb::Page
++void destroy_web_page(void* page_handle);
++
++// Shutdown LibWeb runtime
++void shutdown_libweb();
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/WebContentProcess.cpp b/UI/Android/app/src/main/cpp/WebContentProcess.cpp
+index 08d3b11d..01a7df90 100644
+--- a/UI/Android/app/src/main/cpp/WebContentProcess.cpp
++++ b/UI/Android/app/src/main/cpp/WebContentProcess.cpp
+@@ -1,10 +1,12 @@
+ // SPDX-License-Identifier: BSD-2-Clause
+ #include "WebContentProcess.h"
+ #include "AndroidViewImplementation.h"
++#include "LibWebAndroid.h"
+ #include <android/log.h>
+ #include <unistd.h>
+ #include <poll.h>
+ #include <cstring>
++#include <cerrno>
+ 
+ #define LOG_TAG "WebContent"
+ #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+@@ -89,9 +91,18 @@ void WebContentProcess::run()
+ {
+     LOGI("WebContent thread started");
+ 
+-    // TODO: Initialize LibCore::EventLoop for this thread
+-    // TODO: Create LibWeb::Page with Android platform adapter
+-    // TODO: Initialize JS::VM and Web bindings
++    // Initialize LibWeb for this thread
++    if (!initialize_libweb_for_android()) {
++        LOGE("Failed to initialize LibWeb — rendering disabled");
++        // Continue anyway for IPC testing, but no actual rendering
++    }
++
++    // Create LibWeb::Page with initial viewport size
++    int width = 800, height = 600; // Default, will be updated by Resize IPC
++    m_web_page = create_web_page(width, height);
++    if (!m_web_page) {
++        LOGE("Failed to create LibWeb::Page — rendering disabled");
++    }
+ 
+     // Main event loop — poll IPC pipe for commands from UI thread
+     struct pollfd pfd;
+@@ -113,7 +124,13 @@ void WebContentProcess::run()
+         // TODO: Handle JS microtasks
+     }
+ 
+-    // TODO: Cleanup LibWeb::Page and JS::VM
++    // Cleanup LibWeb::Page
++    if (m_web_page) {
++        destroy_web_page(m_web_page);
++        m_web_page = nullptr;
++    }
++    shutdown_libweb();
++
+     LOGI("WebContent thread exiting");
+ }
+ 
+@@ -131,19 +148,25 @@ void WebContentProcess::process_ipc_messages()
+     switch (msg.type) {
+     case IPCMessageType::LoadURL:
+         LOGI("LoadURL IPC: %s", msg.data.load_url.url);
+-        // TODO: Call LibWeb::Page::load(URL::URL::create_with_url_or_path(msg.data.load_url.url))
+-        // TODO: Trigger HTML parsing and layout
++        if (m_web_page) {
++            web_page_load_url(m_web_page, msg.data.load_url.url);
++        }
+         send_paint_request();
+         break;
+ 
+     case IPCMessageType::Resize:
+         LOGI("Resize IPC: %dx%d", msg.data.resize.width, msg.data.resize.height);
+-        // TODO: Call LibWeb::Page::set_viewport_size()
++        if (m_web_page) {
++            web_page_resize(m_web_page, msg.data.resize.width, msg.data.resize.height);
++        }
+         send_paint_request();
+         break;
+ 
+     case IPCMessageType::MouseEvent:
+-        // TODO: Convert to LibWeb::UIEvents::MouseEvent and dispatch
++        if (m_web_page) {
++            web_page_mouse_event(m_web_page, msg.data.mouse.x, msg.data.mouse.y,
++                msg.data.mouse.button, msg.data.mouse.pressed);
++        }
+         break;
+ 
+     case IPCMessageType::ScrollEvent:
+@@ -159,8 +182,13 @@ void WebContentProcess::process_ipc_messages()
+ 
+ void WebContentProcess::send_paint_request()
+ {
+-    // TODO: Render LibWeb::Page to Skia canvas
+-    // TODO: Submit frame buffer to AndroidViewImplementation compositor
++    // Render LibWeb::Page to frame buffer
++    if (m_web_page) {
++        [[maybe_unused]] void* frame_buffer = web_page_render(m_web_page);
++        // TODO: Pass frame_buffer to AndroidViewImplementation compositor
++    }
++
++    // Request UI thread to repaint ANativeWindow
+     if (m_view) {
+         m_view->request_repaint();
+     }
+diff --git a/UI/Android/app/src/main/cpp/WebContentProcess.h b/UI/Android/app/src/main/cpp/WebContentProcess.h
+index cfb4b6f2..2f4d5256 100644
+--- a/UI/Android/app/src/main/cpp/WebContentProcess.h
++++ b/UI/Android/app/src/main/cpp/WebContentProcess.h
+@@ -41,9 +41,7 @@ private:
+     pthread_t m_thread {};
+     int m_ipc_fds[2] { -1, -1 }; // Unix pipe for IPC
+     bool m_running { false };
+-
+-    // TODO: LibWeb::Page* m_page;
+-    // TODO: JS::VM* m_vm;
++    void* m_web_page { nullptr }; // LibWeb::Page* (opaque until linked)
+ };
+ 
+ } // namespace Ladybird::Android
+-- 
+2.54.0.windows.1
+

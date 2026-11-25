@@ -1,0 +1,87 @@
+From 97bab6227bbd3b755ecfb422579b868ce57857f9 Mon Sep 17 00:00:00 2001
+From: Android Port Development <android-port@localhost>
+Date: Wed, 25 Nov 2026 14:22:22 +0300
+Subject: [PATCH 04/14] Android: add instrumented native platform smoke test
+
+---
+ UI/Android/app/build.gradle.kts                |  8 ++++++++
+ .../androidport/PlatformSmokeTest.java         | 18 ++++++++++++++++++
+ .../org/ladybird/androidport/NativeBridge.java |  6 +++---
+ UI/Android/gradle.properties                   |  1 +
+ 4 files changed, 30 insertions(+), 3 deletions(-)
+ create mode 100644 UI/Android/app/src/androidTest/java/org/ladybird/androidport/PlatformSmokeTest.java
+
+diff --git a/UI/Android/app/build.gradle.kts b/UI/Android/app/build.gradle.kts
+index 22645834..1f5c1c6e 100644
+--- a/UI/Android/app/build.gradle.kts
++++ b/UI/Android/app/build.gradle.kts
+@@ -9,6 +9,7 @@ android {
+         targetSdk = 35
+         versionCode = 1
+         versionName = "0.0.1-bringup"
++        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+         externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_shared" } }
+     }
+@@ -17,4 +18,11 @@ android {
+         sourceCompatibility = JavaVersion.VERSION_17
+         targetCompatibility = JavaVersion.VERSION_17
+     }
++    testOptions { animationsDisabled = true }
++}
++dependencies {
++    androidTestImplementation("androidx.test:runner:1.7.0")
++    androidTestImplementation("androidx.test:rules:1.7.0")
++    androidTestImplementation("androidx.test.ext:junit:1.3.0")
++    androidTestImplementation("junit:junit:4.13.2")
+ }
+diff --git a/UI/Android/app/src/androidTest/java/org/ladybird/androidport/PlatformSmokeTest.java b/UI/Android/app/src/androidTest/java/org/ladybird/androidport/PlatformSmokeTest.java
+new file mode 100644
+index 00000000..e1e54881
+--- /dev/null
++++ b/UI/Android/app/src/androidTest/java/org/ladybird/androidport/PlatformSmokeTest.java
+@@ -0,0 +1,18 @@
++package org.ladybird.androidport;
++
++import static org.junit.Assert.assertTrue;
++
++import androidx.test.ext.junit.runners.AndroidJUnit4;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++
++@RunWith(AndroidJUnit4.class)
++public final class PlatformSmokeTest {
++    @Test public void nativeStackBoundsAndLocalSocketpairWorkOnDevice() {
++        String report = NativeBridge.platformReport();
++        assertTrue(report, report.contains("Unix socketpair round-trip: PASS"));
++        assertTrue(report, report.contains("Upstream AK::StackInfo: PASS (JNI thread)"));
++        assertTrue(report, report.contains("Upstream AK::StackInfo: PASS (native worker thread)"));
++        assertTrue(report, report.contains("Engine status: NOT LINKED"));
++    }
++}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java b/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
+index 231d8542..29992a9d 100644
+--- a/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
++++ b/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
+@@ -1,8 +1,8 @@
+ package org.ladybird.androidport;
+ 
+-/** Bootstrap diagnostics only. No rendering engine is linked yet. */
+-final class NativeBridge {
++/** JNI diagnostics backed by the upstream AK::StackInfo implementation. */
++public final class NativeBridge {
+     static { System.loadLibrary("ladybird_android_bootstrap"); }
+-    static native String platformReport();
++    public static native String platformReport();
+     private NativeBridge() {}
+ }
+diff --git a/UI/Android/gradle.properties b/UI/Android/gradle.properties
+index 462f2f0f..c751e06c 100644
+--- a/UI/Android/gradle.properties
++++ b/UI/Android/gradle.properties
+@@ -1 +1,2 @@
+ org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
++android.useAndroidX=true
+-- 
+2.54.0.windows.1
+

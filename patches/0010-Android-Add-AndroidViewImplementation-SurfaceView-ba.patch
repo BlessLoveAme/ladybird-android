@@ -1,0 +1,277 @@
+From 4ca24a4f734db62b9d0f228e66340008df76b88c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=98=D0=BB=D1=8C=D1=8F=20=D0=9F=D0=B0=D0=B2=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B2?= <iadmin@aviales.local>
+Date: Wed, 25 Nov 2026 16:46:15 +0300
+Subject: [PATCH 10/14] Android: Add AndroidViewImplementation (SurfaceView
+ backend for WebContent rendering)
+
+- UI/Android/app/src/main/cpp/AndroidViewImplementation.{h,cpp}: Native WebView backend using ANativeWindow from Java SurfaceView
+- Handles WebContent compositor frame submission, touch/key input events, IPC with WebContentProcess (stubs for now)
+- LadybirdEngine.cpp: Wire nativeCreateWebView to ANativeWindow_fromSurface, create AndroidViewImplementation instance
+- nativeLoadURL/nativeDestroyWebView call AndroidViewImplementation methods
+- CMakeLists.txt: Link AndroidViewImplementation.cpp into libladybird_android.so when LADYBIRD_LINK_ENGINE=ON
+- configure-android-engine.ps1: CMake configure script for root Ladybird build (AK/LibCore/LibWeb/LibJS), ready to run after vcpkg manifest completes
+
+Bootstrap APK still builds (AndroidViewImplementation not linked yet). Full engine APK will be built after vcpkg manifest install finishes.
+---
+ .../main/cpp/AndroidViewImplementation.cpp    | 69 +++++++++++++++++++
+ .../src/main/cpp/AndroidViewImplementation.h  | 45 ++++++++++++
+ UI/Android/app/src/main/cpp/CMakeLists.txt    |  5 +-
+ .../app/src/main/cpp/LadybirdEngine.cpp       | 28 ++++++--
+ configure-android-engine.ps1                  | 42 +++++++++++
+ 5 files changed, 182 insertions(+), 7 deletions(-)
+ create mode 100644 UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+ create mode 100644 UI/Android/app/src/main/cpp/AndroidViewImplementation.h
+ create mode 100644 configure-android-engine.ps1
+
+diff --git a/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+new file mode 100644
+index 00000000..ac499e4b
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/AndroidViewImplementation.cpp
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: BSD-2-Clause
++#include "AndroidViewImplementation.h"
++#include <android/log.h>
++#include <cstdlib>
++
++#define LOG_TAG "LadybirdAndroid"
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
++
++namespace Ladybird::Android {
++
++AndroidViewImplementation* AndroidViewImplementation::create(ANativeWindow* window)
++{
++    if (!window) {
++        LOGE("AndroidViewImplementation::create: null ANativeWindow");
++        return nullptr;
++    }
++    return new AndroidViewImplementation(window);
++}
++
++AndroidViewImplementation::AndroidViewImplementation(ANativeWindow* window)
++    : m_native_window(window)
++{
++    LOGI("AndroidViewImplementation created with ANativeWindow %p", window);
++    ANativeWindow_acquire(m_native_window);
++    // TODO: Initialize Skia/ANGLE GL context for compositor rendering
++    // TODO: Spawn WebContentProcess thread with Binder IPC
++}
++
++AndroidViewImplementation::~AndroidViewImplementation()
++{
++    if (m_native_window) {
++        ANativeWindow_release(m_native_window);
++        m_native_window = nullptr;
++    }
++    // TODO: Terminate WebContentProcess
++    LOGI("AndroidViewImplementation destroyed");
++}
++
++void AndroidViewImplementation::load_url(char const* url)
++{
++    LOGI("load_url: %s", url);
++    // TODO: Send LoadURL IPC message to WebContentProcess
++    // For now, just log — WebContent rendering not wired yet
++}
++
++void AndroidViewImplementation::handle_touch_event(float x, float y, bool pressed)
++{
++    // TODO: Convert Android touch to WebContent MouseEvent and send via IPC
++}
++
++void AndroidViewImplementation::handle_key_event(int key_code, bool pressed)
++{
++    // TODO: Convert Android KeyEvent to WebContent KeyEvent and send via IPC
++}
++
++void AndroidViewImplementation::request_repaint()
++{
++    // TODO: Called by WebContent IPC when page needs redraw
++    // Lock ANativeWindow buffer, submit frame from WebContent compositor
++}
++
++void AndroidViewImplementation::did_finish_loading(char const* url)
++{
++    LOGI("did_finish_loading: %s", url);
++    // TODO: Notify Java layer via JNI callback
++}
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/AndroidViewImplementation.h b/UI/Android/app/src/main/cpp/AndroidViewImplementation.h
+new file mode 100644
+index 00000000..3ae75efe
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/AndroidViewImplementation.h
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: BSD-2-Clause
++// Android ViewImplementation — SurfaceView backend for Ladybird WebContent rendering
++#pragma once
++
++#include <AK/Types.h>
++#include <android/native_window.h>
++#include <jni.h>
++
++// Forward declarations for LibWebView types (to be linked after vcpkg manifest)
++namespace WebView {
++// class ViewImplementation;
++// class Application;
++}
++
++namespace Ladybird::Android {
++
++// Android-specific WebView implementation backed by ANativeWindow (from SurfaceView)
++// Handles compositor frame submission, input events, and IPC with WebContentProcess
++class AndroidViewImplementation /* : public WebView::ViewImplementation */ {
++public:
++    // Create WebView backed by Android Surface
++    static AndroidViewImplementation* create(ANativeWindow* window);
++    
++    ~AndroidViewImplementation();
++
++    // Navigate to URL (sends IPC message to WebContentProcess)
++    void load_url(char const* url);
++
++    // Input event dispatch (from Java touch/key events)
++    void handle_touch_event(float x, float y, bool pressed);
++    void handle_key_event(int key_code, bool pressed);
++
++    // Compositor callbacks (called by WebContentProcess via IPC)
++    void request_repaint();
++    void did_finish_loading(char const* url);
++
++private:
++    AndroidViewImplementation(ANativeWindow* window);
++
++    ANativeWindow* m_native_window { nullptr };
++    // TODO: WebContentProcess IPC handle (Binder or Unix socket)
++    // TODO: Skia/ANGLE surface for frame rendering
++};
++
++} // namespace Ladybird::Android
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index 70b9b532..1047ccaf 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -23,7 +23,10 @@ if(LADYBIRD_LINK_ENGINE)
+     # Note: Ladybird root CMake expects ENABLE_GUI_TARGETS=ON for LibWebView
+     add_subdirectory("${LADYBIRD_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/ladybird" EXCLUDE_FROM_ALL)
+     
+-    add_library(ladybird_android SHARED LadybirdEngine.cpp)
++    add_library(ladybird_android SHARED
++        LadybirdEngine.cpp
++        AndroidViewImplementation.cpp
++    )
+     target_compile_features(ladybird_android PRIVATE cxx_std_23)
+     target_compile_options(ladybird_android PRIVATE -Wall -Wextra -Werror)
+     
+diff --git a/UI/Android/app/src/main/cpp/LadybirdEngine.cpp b/UI/Android/app/src/main/cpp/LadybirdEngine.cpp
+index 51d83ef8..5cce24e0 100644
+--- a/UI/Android/app/src/main/cpp/LadybirdEngine.cpp
++++ b/UI/Android/app/src/main/cpp/LadybirdEngine.cpp
+@@ -1,8 +1,10 @@
+ // SPDX-License-Identifier: BSD-2-Clause
+ // Ladybird Android engine — full LibWeb/LibJS WebContent rendering
++#include "AndroidViewImplementation.h"
+ #include <AK/Platform.h>
+ #include <AK/StackInfo.h>
+ #include <AK/Types.h>
++#include <android/native_window_jni.h>
+ #include <jni.h>
+ #include <cstdlib>
+ #include <string>
+@@ -59,22 +61,36 @@ Java_org_ladybird_androidport_NativeBridge_platformReport(JNIEnv* env, jclass)
+ extern "C" JNIEXPORT jlong JNICALL
+ Java_org_ladybird_androidport_NativeBridge_nativeCreateWebView(JNIEnv* env, jclass, jobject surface)
+ {
+-    // TODO: Create WebView::ViewImplementation with ANativeWindow from surface
+-    // TODO: Spawn WebContentProcess thread and return opaque handle
+-    // Returns 0 (nullptr) until ViewImplementation is implemented
+-    return 0;
++    // Extract ANativeWindow from Java Surface object
++    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
++    if (!window) {
++        return 0; // null handle
++    }
++    
++    // Create Android ViewImplementation
++    auto* view = Ladybird::Android::AndroidViewImplementation::create(window);
++    ANativeWindow_release(window); // AndroidViewImplementation acquired its own reference
++    
++    return reinterpret_cast<jlong>(view);
+ }
+ 
+ // Navigate WebView to URL
+ extern "C" JNIEXPORT void JNICALL
+ Java_org_ladybird_androidport_NativeBridge_nativeLoadURL(JNIEnv* env, jclass, jlong handle, jstring url)
+ {
+-    // TODO: Send LoadURL IPC message to WebContentProcess via Binder or pipe
++    if (handle == 0) return;
++    auto* view = reinterpret_cast<Ladybird::Android::AndroidViewImplementation*>(handle);
++    
++    char const* url_cstr = env->GetStringUTFChars(url, nullptr);
++    view->load_url(url_cstr);
++    env->ReleaseStringUTFChars(url, url_cstr);
+ }
+ 
+ // Destroy WebView instance
+ extern "C" JNIEXPORT void JNICALL
+ Java_org_ladybird_androidport_NativeBridge_nativeDestroyWebView(JNIEnv* env, jclass, jlong handle)
+ {
+-    // TODO: Terminate WebContentProcess and free ViewImplementation
++    if (handle == 0) return;
++    auto* view = reinterpret_cast<Ladybird::Android::AndroidViewImplementation*>(handle);
++    delete view;
+ }
+diff --git a/configure-android-engine.ps1 b/configure-android-engine.ps1
+new file mode 100644
+index 00000000..42649c5c
+--- /dev/null
++++ b/configure-android-engine.ps1
+@@ -0,0 +1,42 @@
++# Configure Ladybird root CMake for Android engine build
++# Requires vcpkg manifest installed at B:\Build\android-vcpkg-api30
++
++$ErrorActionPreference = "Stop"
++
++$LADYBIRD_ROOT = "B:\"
++$BUILD_DIR = "B:\Build\android-engine-arm64"
++$VCPKG_ROOT = "B:\Build\vcpkg"
++$VCPKG_INSTALLED = "B:\Build\android-vcpkg-api30\vcpkg_installed"
++$NDK_ROOT = "C:\Users\iadmin\AppData\Roaming\CherryStudio\Toolchain\mise\installs\vfox-mise-plugins-vfox-android-sdk\23.0\ndk\28.0.13004108"
++$CMAKE_BIN = "C:\Users\iadmin\AppData\Roaming\CherryStudio\Toolchain\mise\installs\aqua-kitware-c-make\3.31.5\cmake-3.31.5-windows-x86_64\bin\cmake.exe"
++
++Write-Host "==> Configuring Ladybird Android engine (arm64-v8a, API 30)" -ForegroundColor Cyan
++
++# Check vcpkg manifest installed
++if (-not (Test-Path "$VCPKG_INSTALLED\arm64-android")) {
++    Write-Error "vcpkg manifest not installed at $VCPKG_INSTALLED/arm64-android — run vcpkg install first"
++}
++
++# Create build directory
++New-Item -ItemType Directory -Force -Path $BUILD_DIR | Out-Null
++
++# Configure root CMakeLists.txt with Android NDK + vcpkg
++& $CMAKE_BIN `
++    -S $LADYBIRD_ROOT `
++    -B $BUILD_DIR `
++    -G Ninja `
++    -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
++    -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" `
++    -DVCPKG_OVERLAY_TRIPLETS="$LADYBIRD_ROOT/Meta/CMake/vcpkg/android-triplets" `
++    -DVCPKG_TARGET_TRIPLET=arm64-android `
++    -DVCPKG_INSTALLED_DIR="$VCPKG_INSTALLED" `
++    -DVCPKG_MANIFEST_MODE=OFF `
++    -DANDROID_ABI=arm64-v8a `
++    -DANDROID_PLATFORM=android-30 `
++    -DANDROID_STL=c++_shared `
++    -DCMAKE_BUILD_TYPE=Release `
++    -DENABLE_GUI_TARGETS=OFF `
++    -DBUILD_LAGOM=OFF `
++    -DVCPKG_TARGET_ANDROID=ON
++
++Write-Host "==> CMake configure finished. Next: cmake --build $BUILD_DIR --target AK LibCore LibWeb LibJS" -ForegroundColor Green
+-- 
+2.54.0.windows.1
+

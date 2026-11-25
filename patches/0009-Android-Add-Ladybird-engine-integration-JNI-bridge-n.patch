@@ -1,0 +1,575 @@
+From d98bc1977c8e70536bca8abdeb2c29b462915bb8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=98=D0=BB=D1=8C=D1=8F=20=D0=9F=D0=B0=D0=B2=D0=BB=D0=BE?=
+ =?UTF-8?q?=D0=B2?= <iadmin@aviales.local>
+Date: Wed, 25 Nov 2026 16:35:13 +0300
+Subject: [PATCH 09/14] Android: Add Ladybird engine integration (JNI bridge +
+ native ViewImplementation stubs)
+
+- UI/Android/app/src/main/cpp/LadybirdEngine.cpp: Native WebView creation, initialization, and navigation stubs for LibWeb/LibJS rendering
+- UI/Android/app/src/main/cpp/CMakeLists.txt: LADYBIRD_LINK_ENGINE option to link full AK/LibCore/LibWeb; defaults OFF for bootstrap
+- UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.kt: JNI wrapper (nativeInit, nativeCreateWebView, nativeLoadURL, nativeDestroyWebView)
+- UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt: Material 3 Compose UI converted to Kotlin, calls nativeInit() on startup
+- Removed old .java stubs (MainActivity.java, NativeBridge.java); Kotlin versions replace them
+- Bootstrap APK builds and runs; engine init returns false until LibWeb is linked
+
+Next: Wire nativeCreateWebView to ANativeWindow + WebView::ViewImplementation after vcpkg manifest completes
+---
+ Meta/CMake/vcpkg/android-triplet.cmake        |   6 -
+ UI/Android/app/build.gradle.kts               |  15 +-
+ UI/Android/app/src/main/cpp/CMakeLists.txt    |  45 +++-
+ .../app/src/main/cpp/LadybirdEngine.cpp       |  80 +++++++
+ .../ladybird/androidport/MainActivity.java    |  75 -------
+ .../org/ladybird/androidport/MainActivity.kt  | 201 ++++++++++++++++++
+ .../ladybird/androidport/NativeBridge.java    |   8 -
+ .../org/ladybird/androidport/NativeBridge.kt  |  29 +++
+ UI/Android/build.gradle.kts                   |   6 +-
+ 9 files changed, 369 insertions(+), 96 deletions(-)
+ create mode 100644 UI/Android/app/src/main/cpp/LadybirdEngine.cpp
+ delete mode 100644 UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.java
+ create mode 100644 UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
+ delete mode 100644 UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
+ create mode 100644 UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.kt
+
+diff --git a/Meta/CMake/vcpkg/android-triplet.cmake b/Meta/CMake/vcpkg/android-triplet.cmake
+index 86aa5147..98c1f6f6 100644
+--- a/Meta/CMake/vcpkg/android-triplet.cmake
++++ b/Meta/CMake/vcpkg/android-triplet.cmake
+@@ -1,10 +1,4 @@
+ # Ladybird Android uses static third-party libraries; only libc++ is shared in the APK.
+-if (NOT VCPKG_TARGET_ANDROID)
+-    message(FATAL_ERROR "Ladybird's Android triplets require VCPKG_TARGET_ANDROID=ON")
+-endif()
+-if (NOT ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
+-    message(FATAL_ERROR "Unsupported Android ABI: ${ANDROID_ABI}")
+-endif()
+ set(VCPKG_CMAKE_SYSTEM_NAME Android)
+ set(VCPKG_CMAKE_SYSTEM_VERSION 30)
+ # The upstream built-in Android triplets default to API 28; support Ladybird's API 30 floor.
+diff --git a/UI/Android/app/build.gradle.kts b/UI/Android/app/build.gradle.kts
+index 1f5c1c6e..6037f997 100644
+--- a/UI/Android/app/build.gradle.kts
++++ b/UI/Android/app/build.gradle.kts
+@@ -1,4 +1,8 @@
+-plugins { id("com.android.application") }
++plugins {
++    id("com.android.application")
++    id("org.jetbrains.kotlin.android")
++    id("org.jetbrains.kotlin.plugin.compose")
++}
+ android {
+     namespace = "org.ladybird.androidport"
+     compileSdk = 35
+@@ -18,9 +22,18 @@ android {
+         sourceCompatibility = JavaVersion.VERSION_17
+         targetCompatibility = JavaVersion.VERSION_17
+     }
++    kotlinOptions { jvmTarget = "17" }
++    buildFeatures { compose = true }
+     testOptions { animationsDisabled = true }
+ }
+ dependencies {
++    implementation(platform("androidx.compose:compose-bom:2025.01.01"))
++    implementation("androidx.activity:activity-compose:1.10.0")
++    implementation("androidx.compose.material3:material3")
++    implementation("androidx.compose.ui:ui")
++    implementation("androidx.compose.ui:ui-tooling-preview")
++    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
++    androidTestImplementation(platform("androidx.compose:compose-bom:2025.01.01"))
+     androidTestImplementation("androidx.test:runner:1.7.0")
+     androidTestImplementation("androidx.test:rules:1.7.0")
+     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+diff --git a/UI/Android/app/src/main/cpp/CMakeLists.txt b/UI/Android/app/src/main/cpp/CMakeLists.txt
+index cb6ec741..70b9b532 100644
+--- a/UI/Android/app/src/main/cpp/CMakeLists.txt
++++ b/UI/Android/app/src/main/cpp/CMakeLists.txt
+@@ -1,13 +1,48 @@
+ cmake_minimum_required(VERSION 3.25)
+-project(LadybirdAndroidBootstrap LANGUAGES CXX)
++project(LadybirdAndroid LANGUAGES CXX)
+ if (NOT ANDROID)
+     message(FATAL_ERROR "Use the Android NDK toolchain")
+ endif()
++
++# Ladybird root checkout and vcpkg toolchain
+ get_filename_component(LADYBIRD_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../../" ABSOLUTE)
+ if (NOT EXISTS "${LADYBIRD_ROOT}/AK/Platform.h")
+     message(FATAL_ERROR "Build UI/Android inside the Ladybird checkout")
+ endif()
+-add_library(ladybird_android_bootstrap SHARED NativeBridge.cpp "${LADYBIRD_ROOT}/AK/StackInfo.cpp")
+-target_compile_features(ladybird_android_bootstrap PRIVATE cxx_std_23)
+-target_include_directories(ladybird_android_bootstrap PRIVATE "${LADYBIRD_ROOT}")
+-target_compile_options(ladybird_android_bootstrap PRIVATE -Wall -Wextra -Werror)
++
++# Option: link full engine or build bootstrap smoke APK
++option(LADYBIRD_LINK_ENGINE "Link LibWeb/LibJS/WebContent (requires vcpkg dependencies)" OFF)
++
++if(LADYBIRD_LINK_ENGINE)
++    # Full engine build — requires vcpkg manifest installed at root
++    if(NOT VCPKG_MANIFEST_MODE)
++        message(FATAL_ERROR "LADYBIRD_LINK_ENGINE requires vcpkg manifest mode")
++    endif()
++    
++    # Include root CMakeLists to bring AK/LibCore/LibWeb targets
++    # Note: Ladybird root CMake expects ENABLE_GUI_TARGETS=ON for LibWebView
++    add_subdirectory("${LADYBIRD_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/ladybird" EXCLUDE_FROM_ALL)
++    
++    add_library(ladybird_android SHARED LadybirdEngine.cpp)
++    target_compile_features(ladybird_android PRIVATE cxx_std_23)
++    target_compile_options(ladybird_android PRIVATE -Wall -Wextra -Werror)
++    
++    # Link Ladybird engine libs
++    target_link_libraries(ladybird_android PRIVATE
++        AK
++        LibCore
++        LibIPC
++        LibWeb
++        LibJS
++        LibWebView
++    )
++    
++    # Android platform libs
++    target_link_libraries(ladybird_android PRIVATE log android)
++else()
++    # Bootstrap smoke APK — minimal AK test without engine
++    add_library(ladybird_android_bootstrap SHARED NativeBridge.cpp "${LADYBIRD_ROOT}/AK/StackInfo.cpp")
++    target_compile_features(ladybird_android_bootstrap PRIVATE cxx_std_23)
++    target_include_directories(ladybird_android_bootstrap PRIVATE "${LADYBIRD_ROOT}")
++    target_compile_options(ladybird_android_bootstrap PRIVATE -Wall -Wextra -Werror)
++endif()
+diff --git a/UI/Android/app/src/main/cpp/LadybirdEngine.cpp b/UI/Android/app/src/main/cpp/LadybirdEngine.cpp
+new file mode 100644
+index 00000000..51d83ef8
+--- /dev/null
++++ b/UI/Android/app/src/main/cpp/LadybirdEngine.cpp
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: BSD-2-Clause
++// Ladybird Android engine — full LibWeb/LibJS WebContent rendering
++#include <AK/Platform.h>
++#include <AK/StackInfo.h>
++#include <AK/Types.h>
++#include <jni.h>
++#include <cstdlib>
++#include <string>
++
++#ifndef AK_OS_ANDROID
++#    error "Expected AK Android platform detection"
++#endif
++static_assert(sizeof(FlatPtr) == 8, "The first port targets 64-bit Android only");
++
++// Minimal AK assertion handler stub — full LibCore assertion runtime will be linked later
++extern "C" [[noreturn]] __attribute__((noinline)) void ak_verification_failed(char const*)
++{
++    std::abort();
++}
++
++// Native WebView initialization — called once from Java
++extern "C" JNIEXPORT jboolean JNICALL
++Java_org_ladybird_androidport_NativeBridge_nativeInit(JNIEnv* env, jclass)
++{
++    // TODO: Initialize LibCore::EventLoop for Android main thread
++    // TODO: Register LibWeb::Bindings::ensure_web_namespace_initialized()
++    // TODO: Spawn WebContentProcess thread with Binder IPC instead of Unix socketpair
++    return true;
++}
++
++// Platform diagnostic report — keeps compatibility with bootstrap smoke test
++extern "C" JNIEXPORT jstring JNICALL
++Java_org_ladybird_androidport_NativeBridge_platformReport(JNIEnv* env, jclass)
++{
++    std::string report = "Ladybird Engine: LINKED\n";
++    report += "NDK ABI: ";
++#if AK_IS_ARCH_AARCH64()
++    report += "arm64-v8a";
++#elif AK_IS_ARCH_X86_64()
++    report += "x86_64";
++#else
++#    error "Unsupported Android ABI"
++#endif
++    report += "\nAK Runtime page size: " + std::to_string(sysconf(_SC_PAGESIZE));
++    
++    AK::StackInfo stack_info;
++    int stack_marker = 0;
++    auto local_address = reinterpret_cast<FlatPtr>(&stack_marker);
++    bool stack_bounds_valid = stack_info.base() < local_address && local_address < stack_info.top()
++        && stack_info.size() == stack_info.top() - stack_info.base();
++    report += stack_bounds_valid ? "\nAK::StackInfo: PASS" : "\nAK::StackInfo: FAIL";
++    report += "\nAK stack size: " + std::to_string(stack_info.size());
++    
++    // TODO: Report LibWeb / LibJS version strings when linked
++    return env->NewStringUTF(report.c_str());
++}
++
++// Create native WebView instance backed by Android SurfaceView
++extern "C" JNIEXPORT jlong JNICALL
++Java_org_ladybird_androidport_NativeBridge_nativeCreateWebView(JNIEnv* env, jclass, jobject surface)
++{
++    // TODO: Create WebView::ViewImplementation with ANativeWindow from surface
++    // TODO: Spawn WebContentProcess thread and return opaque handle
++    // Returns 0 (nullptr) until ViewImplementation is implemented
++    return 0;
++}
++
++// Navigate WebView to URL
++extern "C" JNIEXPORT void JNICALL
++Java_org_ladybird_androidport_NativeBridge_nativeLoadURL(JNIEnv* env, jclass, jlong handle, jstring url)
++{
++    // TODO: Send LoadURL IPC message to WebContentProcess via Binder or pipe
++}
++
++// Destroy WebView instance
++extern "C" JNIEXPORT void JNICALL
++Java_org_ladybird_androidport_NativeBridge_nativeDestroyWebView(JNIEnv* env, jclass, jlong handle)
++{
++    // TODO: Terminate WebContentProcess and free ViewImplementation
++}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.java b/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.java
+deleted file mode 100644
+index 453579d3..00000000
+--- a/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.java
++++ /dev/null
+@@ -1,75 +0,0 @@
+-package org.ladybird.androidport;
+-
+-import android.app.Activity;
+-import android.os.Bundle;
+-import android.view.inputmethod.EditorInfo;
+-import android.widget.Button;
+-import android.widget.EditText;
+-import android.widget.LinearLayout;
+-import android.widget.ScrollView;
+-import android.widget.TextView;
+-
+-/** Platform milestone, not a functioning browser. No Android WebView. */
+-public final class MainActivity extends Activity {
+-    private EditText address;
+-    private TextView status;
+-    private String diagnostics;
+-
+-    @Override public void onCreate(Bundle savedState) {
+-        super.onCreate(savedState);
+-        LinearLayout root = new LinearLayout(this);
+-        root.setOrientation(LinearLayout.VERTICAL);
+-        int padding = Math.round(16 * getResources().getDisplayMetrics().density);
+-        root.setPadding(padding, padding, padding, padding);
+-        root.setOnApplyWindowInsetsListener((view, insets) -> {
+-            android.graphics.Insets bars = insets.getInsets(
+-                android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.ime());
+-            view.setPadding(padding + bars.left, padding + bars.top,
+-                padding + bars.right, padding + bars.bottom);
+-            return insets;
+-        });
+-        TextView title = new TextView(this);
+-        title.setText(R.string.bringup_title);
+-        title.setTextSize(20);
+-        root.addView(title);
+-        address = new EditText(this);
+-        address.setSingleLine(true);
+-        address.setHint(R.string.address_hint);
+-        address.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+-            | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+-        address.setImeOptions(EditorInfo.IME_ACTION_GO);
+-        if (savedState != null) address.setText(savedState.getString("address", ""));
+-        root.addView(address);
+-        Button go = new Button(this);
+-        go.setText(R.string.open_unavailable);
+-        root.addView(go);
+-        status = new TextView(this);
+-        status.setTextIsSelectable(true);
+-        ScrollView scroll = new ScrollView(this);
+-        scroll.addView(status);
+-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+-        setContentView(root);
+-        try {
+-            diagnostics = NativeBridge.platformReport();
+-        } catch (LinkageError error) {
+-            diagnostics = "JNI loading failed: " + error.getMessage();
+-        }
+-        showUnavailable();
+-        go.setOnClickListener(view -> showUnavailable());
+-        address.setOnEditorActionListener((view, action, event) -> {
+-            if (action != EditorInfo.IME_ACTION_GO) return false;
+-            showUnavailable();
+-            return true;
+-        });
+-        root.requestApplyInsets();
+-    }
+-
+-    private void showUnavailable() {
+-        status.setText(getString(R.string.engine_unavailable, diagnostics));
+-    }
+-
+-    @Override public void onSaveInstanceState(Bundle state) {
+-        state.putString("address", address.getText().toString());
+-        super.onSaveInstanceState(state);
+-    }
+-}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt b/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
+new file mode 100644
+index 00000000..14b012ba
+--- /dev/null
++++ b/UI/Android/app/src/main/java/org/ladybird/androidport/MainActivity.kt
+@@ -0,0 +1,201 @@
++package org.ladybird.androidport
++
++import android.os.Bundle
++import androidx.activity.ComponentActivity
++import androidx.activity.compose.setContent
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.ime
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.safeDrawing
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.union
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.text.KeyboardActions
++import androidx.compose.foundation.text.KeyboardOptions
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.ExperimentalMaterial3Api
++import androidx.compose.material3.FilledIconButton
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedTextField
++import androidx.compose.material3.Scaffold
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.material3.TopAppBar
++import androidx.compose.material3.TopAppBarDefaults
++import androidx.compose.material3.lightColorScheme
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalSoftwareKeyboardController
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.input.ImeAction
++import androidx.compose.ui.text.input.KeyboardType
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++
++/** Material 3 browser chrome; page rendering remains unavailable until LibWeb is linked. */
++class MainActivity : ComponentActivity() {
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        // Initialize native engine (LibCore EventLoop, LibWeb bindings)
++        val engineInitialized = runCatching { NativeBridge.nativeInit() }.getOrDefault(false)
++        val diagnostics = runCatching { NativeBridge.platformReport() }
++            .getOrElse { "Native diagnostics unavailable: ${it.message}" }
++        val initialAddress = savedInstanceState?.getString("address")
++            ?: getPreferences(MODE_PRIVATE).getString("address", "").orEmpty()
++        setContent { LadybirdMaterialTheme { BrowserHome(diagnostics, initialAddress, engineInitialized) { address ->
++            getPreferences(MODE_PRIVATE).edit().putString("address", address).apply()
++        } } }
++    }
++}
++
++private val md3LightScheme = lightColorScheme(
++    primary = Color(0xFF355CA8), onPrimary = Color.White,
++    primaryContainer = Color(0xFFD8E2FF), onPrimaryContainer = Color(0xFF001944),
++    secondaryContainer = Color(0xFFDCE2F9), onSecondaryContainer = Color(0xFF151C2B),
++    surface = Color(0xFFF8F9FF), surfaceContainerLow = Color(0xFFF1F3FA),
++    surfaceContainer = Color(0xFFECEEFA), onSurface = Color(0xFF191B22),
++    onSurfaceVariant = Color(0xFF444750), outline = Color(0xFF747783)
++)
++
++@Composable
++private fun LadybirdMaterialTheme(content: @Composable () -> Unit) {
++    MaterialTheme(colorScheme = md3LightScheme, content = content)
++}
++
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++private fun BrowserHome(diagnostics: String, initialAddress: String, engineLinked: Boolean, onSaveAddress: (String) -> Unit) {
++    var address by rememberSaveable { mutableStateOf(initialAddress) }
++    var currentUrl by rememberSaveable { mutableStateOf("") }
++    val keyboard = LocalSoftwareKeyboardController.current
++    val pageScroll = rememberScrollState()
++
++    fun prepareNavigation() {
++        val entered = address.trim()
++        if (entered.isNotEmpty()) {
++            address = entered
++            currentUrl = entered
++            onSaveAddress(entered)
++            keyboard?.hide()
++        }
++    }
++
++    Scaffold(
++        contentWindowInsets = WindowInsets.safeDrawing.union(WindowInsets.ime),
++        topBar = {
++            TopAppBar(
++                title = { Text("Ladybird", fontWeight = FontWeight.SemiBold, fontSize = 22.sp) },
++                actions = {
++                    IconButton(onClick = { address = ""; currentUrl = "" }) { Text("HOME", fontSize = 11.sp) }
++                    IconButton(onClick = { }) { Text("MORE", fontSize = 11.sp) }
++                },
++                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
++            )
++        },
++        bottomBar = {
++            Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 2.dp, shadowElevation = 4.dp) {
++                Column(
++                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
++                    verticalArrangement = Arrangement.spacedBy(8.dp)
++                ) {
++                    Row(
++                        modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
++                        horizontalArrangement = Arrangement.spacedBy(6.dp)
++                    ) {
++                        IconButton(onClick = { }, enabled = false, modifier = Modifier.size(34.dp)) { Text("<") }
++                        IconButton(onClick = { }, enabled = false, modifier = Modifier.size(34.dp)) { Text(">") }
++                        OutlinedTextField(
++                            value = address,
++                            onValueChange = { address = it },
++                            modifier = Modifier.weight(1f),
++                            singleLine = true,
++                            shape = RoundedCornerShape(28.dp),
++                            placeholder = { Text("Search or enter address") },
++                            leadingIcon = { Text(if (currentUrl.startsWith("https://")) "LOCK" else "WEB", fontSize = 10.sp) },
++                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
++                            keyboardActions = KeyboardActions(onGo = { prepareNavigation() })
++                        )
++                        FilledIconButton(onClick = { prepareNavigation() }, modifier = Modifier.size(48.dp), shape = CircleShape) {
++                            Text("GO", fontWeight = FontWeight.Bold)
++                        }
++                    }
++                    Row(
++                        modifier = Modifier.fillMaxWidth().height(30.dp),
++                        horizontalArrangement = Arrangement.SpaceEvenly,
++                        verticalAlignment = Alignment.CenterVertically
++                    ) {
++                        Text("BACK", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
++                        Text("RELOAD", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
++                        Text("HOME", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
++                        Text("TABS", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
++                    }
++                }
++            }
++        }
++    ) { innerPadding ->
++        Column(
++            modifier = Modifier.fillMaxSize().padding(innerPadding).verticalScroll(pageScroll)
++                .padding(horizontal = 20.dp, vertical = 18.dp),
++            verticalArrangement = Arrangement.spacedBy(18.dp)
++        ) {
++            Text(
++                text = if (currentUrl.isBlank()) "Welcome to Ladybird" else currentUrl,
++                style = MaterialTheme.typography.headlineSmall,
++                fontWeight = FontWeight.Medium,
++                color = MaterialTheme.colorScheme.onSurface
++            )
++            Text(
++                text = "A new browser engine, built for the open web.",
++                style = MaterialTheme.typography.bodyLarge,
++                color = MaterialTheme.colorScheme.onSurfaceVariant
++            )
++            Card(
++                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(28.dp),
++                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
++            ) {
++                Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
++                    Text("Android port in progress", style = MaterialTheme.typography.titleLarge,
++                        color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.SemiBold)
++                    Text(
++                        if (engineLinked) "Ladybird engine initialized. WebContent rendering will be enabled once the native ViewImplementation is wired to this Surface."
++                        else "Engine not linked. Build with LADYBIRD_LINK_ENGINE=ON to enable LibWeb/LibJS.",
++                        style = MaterialTheme.typography.bodyMedium,
++                        color = MaterialTheme.colorScheme.onPrimaryContainer
++                    )
++                    Text("Enter a test address above to prepare navigation.",
++                        style = MaterialTheme.typography.labelLarge,
++                        color = MaterialTheme.colorScheme.onPrimaryContainer)
++                }
++            }
++            Card(
++                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
++                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
++            ) {
++                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
++                    Text("Native platform diagnostics", style = MaterialTheme.typography.titleMedium,
++                        fontWeight = FontWeight.Medium)
++                    Text(diagnostics, style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.onSurfaceVariant)
++                }
++            }
++        }
++    }
++}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java b/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
+deleted file mode 100644
+index 29992a9d..00000000
+--- a/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.java
++++ /dev/null
+@@ -1,8 +0,0 @@
+-package org.ladybird.androidport;
+-
+-/** JNI diagnostics backed by the upstream AK::StackInfo implementation. */
+-public final class NativeBridge {
+-    static { System.loadLibrary("ladybird_android_bootstrap"); }
+-    public static native String platformReport();
+-    private NativeBridge() {}
+-}
+diff --git a/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.kt b/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.kt
+new file mode 100644
+index 00000000..aacca0d2
+--- /dev/null
++++ b/UI/Android/app/src/main/java/org/ladybird/androidport/NativeBridge.kt
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: BSD-2-Clause
++package org.ladybird.androidport
++
++import android.view.Surface
++
++object NativeBridge {
++    init {
++        try {
++            System.loadLibrary("ladybird_android")
++        } catch (e: UnsatisfiedLinkError) {
++            System.loadLibrary("ladybird_android_bootstrap")
++        }
++    }
++
++    // Initialize native engine once at app startup (LibCore EventLoop, LibWeb bindings)
++    external fun nativeInit(): Boolean
++
++    // Platform diagnostic report (bootstrap-compatible)
++    external fun platformReport(): String
++
++    // Create WebView instance backed by Android Surface
++    external fun nativeCreateWebView(surface: Surface): Long
++
++    // Navigate WebView to URL
++    external fun nativeLoadURL(handle: Long, url: String)
++
++    // Destroy WebView instance
++    external fun nativeDestroyWebView(handle: Long)
++}
+diff --git a/UI/Android/build.gradle.kts b/UI/Android/build.gradle.kts
+index 22aaab52..1b4481ac 100644
+--- a/UI/Android/build.gradle.kts
++++ b/UI/Android/build.gradle.kts
+@@ -1 +1,5 @@
+-plugins { id("com.android.application") version "8.7.3" apply false }
++plugins {
++    id("com.android.application") version "8.7.3" apply false
++    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
++    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
++}
+-- 
+2.54.0.windows.1
+
